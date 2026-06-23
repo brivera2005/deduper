@@ -6,7 +6,7 @@ Thanks for your interest in making Deduper better!
 
 1. Fork the repo and clone it locally.
 2. Install [Node.js 18+](https://nodejs.org), [Rust stable](https://rustup.rs), and the Visual Studio 2022 C++ build tools (Windows).
-3. Copy `.env.example` to `.env` only for local OAuth testing — never commit `.env`.
+3. Copy `.env.example` to `.env` (or `deduper-oauth.json.example` to `deduper-oauth.json`) for local OAuth — never commit either file. Release builds embed credentials from `.env` at compile time.
 4. Run `npm install`, then `npm run tauri dev`.
 
 ## Pull requests

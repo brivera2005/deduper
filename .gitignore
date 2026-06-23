@@ -18,6 +18,8 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+deduper-oauth.json
+src-tauri/resources/oauth.defaults.json
 *.local
 *.db
 config.json

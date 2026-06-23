@@ -60,7 +60,7 @@ Built with **Tauri 2** (Rust backend + React UI). Runs in the Windows system tra
    - Welcome
    - How it works (never auto-delete)
    - Pick PC vault folder
-   - Connect Google Drive (OAuth credentials + sign in)
+   - Connect Google Drive (sign in with your Google account)
    - Connect Android phone (USB + detect)
    - First scan tips (overnight OK)
    - Done summary
@@ -80,7 +80,7 @@ Use **Run setup again** anytime from the Setup button in the header.
 | 1 | Welcome and safety promise |
 | 2 | How dedup works (report-first, optional copy to vault) |
 | 3 | Choose a **vault folder** on your PC for consolidated copies |
-| 4 | Paste **Google OAuth** desktop app credentials and connect Drive |
+| 4 | Click **Connect Google Drive** and sign in in your browser |
 | 5 | Plug in Android, enable **File transfer**, detect phone |
 | 6 | Tips for first full scan (can run overnight) |
 | 7 | Summary and link to dashboard |
@@ -93,45 +93,67 @@ Wizard progress is stored in `%APPDATA%\com.deduper.app\config.json` (local only
 
 Deduper uses **read-only** Drive access to list files and read `md5Checksum` metadata (no file downloads required for dedup).
 
-### 1. Create Google Cloud project
+### For end users (installed release)
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project (e.g. "Deduper")
-3. **APIs & Services → Library** → enable **Google Drive API**
+Public releases ship with OAuth credentials embedded at build time. You only:
 
-### 2. Create OAuth credentials
+1. Open the setup wizard (Step 4) or dashboard
+2. Click **Connect Google Drive**
+3. Sign in with **your** Google account in the browser
+4. Approve read-only access and return to Deduper
 
-1. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
-2. Application type: **Desktop app**
-3. Name it "Deduper Desktop"
-4. Copy the **Client ID** and **Client secret**
+Google may show **“This app isn’t verified”** — that is normal until the app completes Google’s verification flow. Choose **Advanced → Go to Deduper (unsafe)** or **Continue** to proceed. Deduper never sees your Google password.
 
-### 3. Configure redirect URI
+### For maintainers (building releases)
 
-Add this authorized redirect URI on the OAuth client:
+Before `npm run tauri build`, provide Desktop OAuth credentials so they are embedded into the installer:
 
-```
-http://127.0.0.1:8888/oauth/callback
-```
-
-### 4. Enter credentials in Deduper
-
-**Installed app (recommended):** Paste Client ID + Secret in the setup wizard (Step 4) or Settings. Saved locally to:
-
-```
-%APPDATA%\com.deduper.app\config.json
-```
-
-**Development:** Copy `.env.example` to `.env` in the project root:
+**Option A — `.env` in the project root** (copy from `.env.example`):
 
 ```env
 GOOGLE_CLIENT_ID=your-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-secret
 ```
 
-Never commit `.env` or `config.json`.
+**Option B — `deduper-oauth.json`** (copy from `deduper-oauth.json.example`):
 
-### 5. Connect in the app
+```json
+{
+  "google_client_id": "your-id.apps.googleusercontent.com",
+  "google_client_secret": "your-secret"
+}
+```
+
+Both files are gitignored. Never commit real secrets.
+
+The build script also checks `%APPDATA%\com.deduper.app\config.json` on the build machine if no `.env` is present.
+
+Credential priority at **runtime**:
+
+1. User-overridden credentials in `%APPDATA%\com.deduper.app\config.json` (Advanced in setup wizard)
+2. Build-time embedded defaults (release builds)
+3. `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` environment variables (local dev)
+
+### For developers (bring your own OAuth app)
+
+If you build from source without embedded credentials, expand **Advanced: use your own Google Cloud app** in the setup wizard.
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a project (e.g. "Deduper")
+3. **APIs & Services → Library** → enable **Google Drive API**
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+5. Application type: **Desktop app**
+6. Add authorized redirect URI:
+
+```
+http://127.0.0.1:8888/oauth/callback
+```
+
+7. Paste Client ID + Secret under Advanced in the wizard (saved locally to AppData)
+
+Never commit `.env`, `deduper-oauth.json`, or `config.json`.
+
+### Connect in the app
 
 Click **Connect Google Drive** → browser opens → sign in → approve read-only access → return to Deduper.
 
@@ -196,7 +218,7 @@ Google Drive   ───┘         │                                      │
 | SQLite inventory + resumable scan checkpoints | Working |
 | SHA-256 local hashing | Working |
 | Google Drive metadata scan (`md5Checksum`) | Working |
-| OAuth config in AppData (installed exe) | Working |
+| OAuth embedded in release builds + optional Advanced override | Working |
 | Token refresh | Working |
 | Local folder scanner | Working |
 | Android USB MTP detect + scan (Windows WPD/Shell) | Working |
@@ -259,7 +281,7 @@ deduper/
 
 ## Testing with your Drive account
 
-1. Complete OAuth setup above
+1. Connect Google Drive in the setup wizard (or dashboard)
 2. Run setup wizard — vault, Drive, phone
 3. **Scan Drive** → **Scan Phone** → **Scan** local folder
 4. Hero metric shows recoverable GB/count

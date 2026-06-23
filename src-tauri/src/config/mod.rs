@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod embedded;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -59,6 +61,9 @@ impl AppConfig {
                 return Some(id.trim().to_string());
             }
         }
+        if let Some(id) = embedded::client_id() {
+            return Some(id);
+        }
         std::env::var("GOOGLE_CLIENT_ID")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -69,6 +74,9 @@ impl AppConfig {
             if !secret.trim().is_empty() {
                 return Some(secret.trim().to_string());
             }
+        }
+        if let Some(secret) = embedded::client_secret() {
+            return Some(secret);
         }
         std::env::var("GOOGLE_CLIENT_SECRET")
             .ok()
@@ -87,21 +95,22 @@ pub struct GoogleOAuthConfigStatus {
     pub source: String,
 }
 
+fn preview_client_id(id: &str) -> String {
+    if id.len() > 12 {
+        format!("{}…", &id[..12])
+    } else {
+        id.to_string()
+    }
+}
+
 pub fn get_google_oauth_status(data_dir: &Path) -> GoogleOAuthConfigStatus {
     let cfg = AppConfig::load(data_dir);
-    let env_id = std::env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty());
-    let env_secret = std::env::var("GOOGLE_CLIENT_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty());
 
     if cfg.has_google_credentials() {
-        let preview = cfg.google_client_id.as_ref().map(|id| {
-            if id.len() > 12 {
-                format!("{}…", &id[..12])
-            } else {
-                id.clone()
-            }
-        });
+        let preview = cfg
+            .google_client_id
+            .as_ref()
+            .map(|id| preview_client_id(id.trim()));
         return GoogleOAuthConfigStatus {
             configured: true,
             client_id_preview: preview,
@@ -109,14 +118,24 @@ pub fn get_google_oauth_status(data_dir: &Path) -> GoogleOAuthConfigStatus {
         };
     }
 
+    if embedded::has_credentials() {
+        let preview = embedded::client_id().map(|id| preview_client_id(&id));
+        return GoogleOAuthConfigStatus {
+            configured: true,
+            client_id_preview: preview,
+            source: "embedded".into(),
+        };
+    }
+
+    let env_id = std::env::var("GOOGLE_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let env_secret = std::env::var("GOOGLE_CLIENT_SECRET")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
     if env_id.is_some() && env_secret.is_some() {
-        let preview = env_id.map(|id| {
-            if id.len() > 12 {
-                format!("{}…", &id[..12])
-            } else {
-                id
-            }
-        });
+        let preview = env_id.as_ref().map(|id| preview_client_id(id.trim()));
         return GoogleOAuthConfigStatus {
             configured: true,
             client_id_preview: preview,
