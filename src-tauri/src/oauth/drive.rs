@@ -32,44 +32,49 @@ fn load_client_credentials(state: &AppState) -> Result<(String, String), String>
     let cfg = crate::config::AppConfig::load(&state.data_dir);
     let id = cfg
         .google_client_id()
-        .ok_or("Google OAuth not configured. Add Client ID and Secret in Setup or Settings.")?;
+        .ok_or("Google Drive sign-in is not available in this build. Reinstall from a release build, or add your own OAuth app under Advanced in setup.")?;
     let secret = cfg
         .google_client_secret()
-        .ok_or("Google OAuth not configured. Add Client ID and Secret in Setup or Settings.")?;
+        .ok_or("Google Drive sign-in is not available in this build. Reinstall from a release build, or add your own OAuth app under Advanced in setup.")?;
     Ok((id, secret))
 }
 
 pub fn get_auth_status(state: &AppState) -> Result<DriveAuthStatus, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT access_token, scopes FROM oauth_tokens WHERE provider = ?1",
-        )?;
-        let result = stmt.query_row(params![PROVIDER], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        });
-
-        match result {
-            Ok((token, scopes)) => {
-                let scope_list: Vec<String> = scopes.split_whitespace().map(String::from).collect();
-                let email = fetch_token_email(&token).ok();
-                Ok(DriveAuthStatus {
-                    connected: true,
-                    email,
-                    write_enabled: scope_list.iter().any(|s| s.contains("drive.file")),
-                    scopes: scope_list,
-                })
+    let token_data: Option<(String, String)> = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT access_token, scopes FROM oauth_tokens WHERE provider = ?1",
+            )?;
+            match stmt.query_row(params![PROVIDER], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                Ok(pair) => Ok(Some(pair)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(DriveAuthStatus {
-                connected: false,
-                email: None,
-                scopes: vec![],
-                write_enabled: false,
-            }),
-            Err(e) => Err(e.into()),
+        })
+        .map_err(|e| e.to_string())?
+    };
+
+    match token_data {
+        None => Ok(DriveAuthStatus {
+            connected: false,
+            email: None,
+            scopes: vec![],
+            write_enabled: false,
+        }),
+        Some((token, scopes)) => {
+            let scope_list: Vec<String> = scopes.split_whitespace().map(String::from).collect();
+            let email = fetch_token_email(&token).ok();
+            Ok(DriveAuthStatus {
+                connected: true,
+                email,
+                write_enabled: scope_list.iter().any(|s| s.contains("drive.file")),
+                scopes: scope_list,
+            })
         }
-    })
-    .map_err(|e| e.to_string())
+    }
 }
 
 fn fetch_token_email(access_token: &str) -> Result<String, String> {

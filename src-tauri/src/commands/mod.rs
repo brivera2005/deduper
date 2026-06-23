@@ -5,6 +5,7 @@ use std::thread;
 
 use rusqlite::params;
 use serde::Serialize;
+use tauri::Manager;
 use uuid::Uuid;
 
 use crate::audit;
@@ -595,7 +596,6 @@ pub fn get_wizard_status(
 ) -> Result<WizardStatus, String> {
     let cfg = AppConfig::load(&state.data_dir);
     let drive = drive::get_auth_status(&state)?;
-    let android_devices = mtp::get_mtp_status();
 
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.with_conn(|conn| {
@@ -623,7 +623,7 @@ pub fn get_wizard_status(
             )
             .ok()
         } else {
-            android_devices.first().map(|d| d.name.clone())
+            None
         };
 
         let vault_path = cfg
@@ -639,7 +639,7 @@ pub fn get_wizard_status(
             google_configured: config::get_google_oauth_status(&state.data_dir).configured,
             drive_connected: drive.connected,
             drive_email: drive.email,
-            android_connected: android_connected > 0 || !android_devices.is_empty(),
+            android_connected: android_connected > 0,
             android_device_name,
             local_source_count,
             first_scan_done: first_scan_done > 0,
@@ -671,11 +671,7 @@ pub fn reset_wizard(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String
     config::reset_wizard(&state.data_dir)
 }
 
-#[tauri::command]
-pub fn set_vault_path(
-    state: tauri::State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<(), String> {
+fn apply_vault_path(state: &AppState, path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
     crate::scanner::local::validate_folder(&path_buf)?;
     config::set_vault_path(&state.data_dir, path.clone())?;
@@ -685,11 +681,53 @@ pub fn set_vault_path(
         .map_err(|e| e.to_string())?;
 
     audit::log_action(
-        &state,
+        state,
         "vault_path_set",
         &serde_json::json!({ "path": path }),
         true,
     )
+}
+
+#[tauri::command]
+pub fn set_vault_path(
+    state: tauri::State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<(), String> {
+    apply_vault_path(&state, path)
+}
+
+/// Pick a vault folder via native dialog on a worker thread (avoids Windows webview deadlocks).
+#[tauri::command]
+pub async fn pick_vault_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title("Choose your vault folder");
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+
+    let picked = tauri::async_runtime::spawn_blocking(move || builder.blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let Some(file_path) = picked else {
+        return Ok(None);
+    };
+
+    let path = file_path
+        .into_path()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .into_owned();
+
+    apply_vault_path(&state, path.clone())?;
+    Ok(Some(path))
 }
 
 #[tauri::command]

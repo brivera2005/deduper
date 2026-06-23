@@ -229,6 +229,24 @@ button {
   background: #7eb3e0;
 }
 
+.btn-lg {
+  font-size: 1.05rem;
+  padding: 0.85rem 1.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.wizard-advanced-note {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.wizard-advanced-note a {
+  color: var(--accent);
+}
+
 .btn-secondary {
   background: var(--bg-elevated);
   color: var(--text);

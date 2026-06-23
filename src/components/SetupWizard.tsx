@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   ChevronDown,
@@ -87,6 +86,7 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
   const [status, setStatus] = useState<WizardStatus | null>(null);
   const [googleId, setGoogleId] = useState("");
   const [googleSecret, setGoogleSecret] = useState("");
+  const [showAdvancedOAuth, setShowAdvancedOAuth] = useState(false);
   const [oauthStatus, setOauthStatus] = useState<GoogleOAuthConfigStatus | null>(null);
   const [driveAuth, setDriveAuth] = useState<DriveAuthStatus | null>(null);
   const [androidDevices, setAndroidDevices] = useState<MtpDeviceInfo[]>([]);
@@ -125,18 +125,13 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
   const progress = (stepNum / STEPS.length) * 100;
 
   const pickVault = async () => {
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: "Choose your vault folder",
-    });
-    if (!selected) return;
     setBusy(true);
     setError(null);
     try {
-      await invoke("set_vault_path", { path: selected });
-      setVaultPath(selected as string);
-      await refresh();
+      const selected = await invoke<string | null>("pick_vault_folder");
+      if (selected) {
+        setVaultPath(selected);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -335,51 +330,86 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
             ) : (
               <>
                 <p>
-                  First, paste your Google OAuth credentials (one-time setup). Then click Connect
-                  to sign in through your browser.
+                  Click <strong>Connect Google Drive</strong> to sign in with your Google account in
+                  your browser. Deduper only gets read-only access to compare your photos — nothing
+                  is deleted automatically.
                 </p>
-                {oauthStatus?.configured && (
-                  <div className="wizard-highlight">
-                    Credentials saved ({oauthStatus.client_id_preview})
-                  </div>
-                )}
-                {!oauthStatus?.configured && (
-                  <div className="wizard-form">
-                    <label>
-                      Client ID
-                      <input
-                        type="text"
-                        value={googleId}
-                        onChange={(e) => setGoogleId(e.target.value)}
-                        placeholder="123456.apps.googleusercontent.com"
-                      />
-                    </label>
-                    <label>
-                      Client Secret
-                      <input
-                        type="password"
-                        value={googleSecret}
-                        onChange={(e) => setGoogleSecret(e.target.value)}
-                        placeholder="Paste from Google Cloud Console"
-                      />
-                    </label>
-                    <button className="btn btn-secondary" onClick={saveGoogleCreds} disabled={busy}>
-                      Save credentials
-                    </button>
-                  </div>
-                )}
                 <button
-                  className="btn btn-primary"
+                  className="btn btn-primary btn-lg"
                   onClick={connectDrive}
                   disabled={busy || !oauthStatus?.configured}
                 >
                   Connect Google Drive
                 </button>
+                {!oauthStatus?.configured && (
+                  <div className="wizard-highlight muted">
+                    Sign-in is not bundled in this build. Expand Advanced below if you are building
+                    from source with your own Google Cloud app.
+                  </div>
+                )}
+                <div className="why-block">
+                  <button
+                    type="button"
+                    className="why-toggle"
+                    onClick={() => setShowAdvancedOAuth(!showAdvancedOAuth)}
+                  >
+                    {showAdvancedOAuth ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    Advanced: use your own Google Cloud app
+                  </button>
+                  {showAdvancedOAuth && (
+                    <div className="why-content">
+                      <p className="wizard-advanced-note">
+                        For developers and open-source builds only. Paste a Desktop OAuth client from{" "}
+                        <a
+                          href="https://console.cloud.google.com/apis/credentials"
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Google Cloud Console
+                        </a>
+                        . Redirect URI:{" "}
+                        <code>http://127.0.0.1:8888/oauth/callback</code>
+                      </p>
+                      {oauthStatus?.configured && oauthStatus.source === "config" && (
+                        <div className="wizard-highlight">
+                          Using your credentials ({oauthStatus.client_id_preview})
+                        </div>
+                      )}
+                      <div className="wizard-form">
+                        <label>
+                          Client ID
+                          <input
+                            type="text"
+                            value={googleId}
+                            onChange={(e) => setGoogleId(e.target.value)}
+                            placeholder="123456.apps.googleusercontent.com"
+                          />
+                        </label>
+                        <label>
+                          Client Secret
+                          <input
+                            type="password"
+                            value={googleSecret}
+                            onChange={(e) => setGoogleSecret(e.target.value)}
+                            placeholder="Paste from Google Cloud Console"
+                          />
+                        </label>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={saveGoogleCreds}
+                          disabled={busy}
+                        >
+                          Save credentials
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
-            <WhyBlock title="Do I need to create a Google app?">
-              Yes — a free one in Google Cloud Console. See the README for step-by-step instructions.
-              Redirect URI must be: <code>http://127.0.0.1:8888/oauth/callback</code>
+            <WhyBlock title="Google shows an unverified app warning?">
+              That is normal until the app is verified. Choose Advanced, then Continue to Deduper.
+              You are signing in with your own Google account — Deduper never sees your password.
             </WhyBlock>
           </>
         )}

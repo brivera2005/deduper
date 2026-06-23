@@ -100,6 +100,7 @@ pub fn run() {
             commands::complete_wizard,
             commands::reset_wizard,
             commands::set_vault_path,
+            commands::pick_vault_folder,
             commands::get_vault_path,
             commands::detect_android_devices,
             commands::connect_android_device,
