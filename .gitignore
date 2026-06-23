@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies & build output
+node_modules/
+dist/
+dist-ssr/
+target/
+src-tauri/target/
+
+# Secrets & local runtime data (never commit)
+.env
+.env.*
+!.env.example
+*.local
+*.db
+config.json
+
+# Rust / Tauri artifacts
+*.pdb
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
