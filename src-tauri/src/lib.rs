@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, RunEvent,
+    Emitter, Manager, RunEvent,
 };
 
 use state::AppState;
@@ -26,6 +26,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -40,8 +42,10 @@ pub fn run() {
             app.manage(state);
 
             let show_i = MenuItem::with_id(app, "show", "Show Deduper", true, None::<&str>)?;
+            let updates_i =
+                MenuItem::with_id(app, "check_updates", "Check for updates", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            let menu = Menu::with_items(app, &[&show_i, &updates_i, &quit_i])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -49,6 +53,13 @@ pub fn run() {
                 .tooltip("Deduper — safe media consolidation")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "check_updates" => {
+                        let _ = app.emit("check-for-updates", ());
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();

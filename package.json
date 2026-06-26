@@ -1,6 +1,6 @@
 {
   "name": "deduper",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Safe media deduplication across Android, Google Drive, and PC — free up Drive space without losing anything",
   "type": "module",
   "scripts": {
@@ -15,7 +15,9 @@
     "@tauri-apps/plugin-fs": "^2",
     "@tauri-apps/plugin-notification": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "lucide-react": "^0.525.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

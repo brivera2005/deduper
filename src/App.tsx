@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import {
   CheckCircle2,
+  Download,
   FolderOpen,
   HardDrive,
   Play,
@@ -14,6 +16,8 @@ import {
   FileText,
 } from "lucide-react";
 import { SetupWizard } from "./components/SetupWizard";
+import { checkForAppUpdate, installAppUpdate } from "./lib/updater";
+import pkg from "../package.json";
 import "./App.css";
 
 interface DashboardStats {
@@ -185,6 +189,10 @@ export default function App() {
     phone: true,
     thisPc: true,
   });
+  const [pendingUpdate, setPendingUpdate] = useState<Awaited<
+    ReturnType<typeof checkForAppUpdate>
+  > | null>(null);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -221,6 +229,41 @@ export default function App() {
       .then(setAndroidDevices)
       .catch(() => setAndroidDevices([]));
   }, [refresh]);
+
+  const runUpdateCheck = useCallback(async (notifyIfCurrent: boolean) => {
+    const result = await checkForAppUpdate();
+    if (result.available && result.update) {
+      setPendingUpdate(result);
+      if (notifyIfCurrent) {
+        showToast(`Update v${result.version} is ready — click Install update.`);
+      }
+    } else {
+      setPendingUpdate(null);
+      if (notifyIfCurrent) {
+        showToast(`You're on the latest version (v${pkg.version}).`);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    runUpdateCheck(false);
+    const unlisten = listen("check-for-updates", () => runUpdateCheck(true));
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [runUpdateCheck]);
+
+  const installUpdate = async () => {
+    if (!pendingUpdate?.update) return;
+    setUpdateInstalling(true);
+    try {
+      showToast("Downloading update… Deduper will restart when done.");
+      await installAppUpdate(pendingUpdate.update);
+    } catch (e) {
+      showToast(String(e));
+      setUpdateInstalling(false);
+    }
+  };
 
   useEffect(() => {
     if (!fullAuditJobId) return;
@@ -463,12 +506,38 @@ export default function App() {
           </div>
         </div>
         <div className="header-actions">
+          <span className="version-tag">v{pkg.version}</span>
+          <button
+            className="btn btn-ghost"
+            onClick={() => runUpdateCheck(true)}
+            disabled={updateInstalling}
+            title="Check GitHub for a newer version"
+          >
+            <Download size={16} style={{ verticalAlign: "middle", marginRight: 4 }} />
+            Check for updates
+          </button>
           <button className="btn btn-ghost" onClick={rerunWizard} title="Setup again">
             <Settings size={16} style={{ verticalAlign: "middle", marginRight: 4 }} />
             Setup
           </button>
         </div>
       </header>
+
+      {pendingUpdate?.available && (
+        <div className="update-banner">
+          <span>
+            <strong>Deduper v{pendingUpdate.version}</strong> is available — install to get the
+            latest fixes.
+          </span>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={installUpdate}
+            disabled={updateInstalling}
+          >
+            {updateInstalling ? "Installing…" : "Install update"}
+          </button>
+        </div>
+      )}
 
       {showWizard && (
         <SetupWizard
