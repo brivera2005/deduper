@@ -97,12 +97,10 @@ impl MtpScanner {
             return vec![];
         }
 
-        serde_json::from_str::<Vec<MtpDeviceJson>>(trimmed)
-            .map(|items| items.into_iter().map(MtpDevice::from).collect())
-            .unwrap_or_else(|e| {
-                eprintln!("MTP detect JSON parse error: {e} — raw: {trimmed}");
-                vec![]
-            })
+        parse_device_json(trimmed)
+            .into_iter()
+            .map(MtpDevice::from)
+            .collect()
     }
 
     fn list_files_for_storage(storage_path: &str) -> Result<Vec<MtpFileJson>, String> {
@@ -137,19 +135,53 @@ fn escape_ps_single(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+#[cfg(windows)]
+fn hide_console_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_cmd: &mut Command) {}
+
+fn parse_device_json(trimmed: &str) -> Vec<MtpDeviceJson> {
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("MTP detect JSON parse error: {e} — raw: {trimmed}");
+            return vec![];
+        }
+    };
+    match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect(),
+        serde_json::Value::Object(_) => {
+            serde_json::from_value(value).map(|one| vec![one]).unwrap_or_default()
+        }
+        _ => vec![],
+    }
+}
+
 /// Run PowerShell off the UI thread path with a hard timeout so MTP/COM enumeration cannot hang forever.
 fn run_powershell_with_timeout(script: &str) -> Result<std::process::Output, String> {
-    let mut child = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to start PowerShell: {e}"))?;
 

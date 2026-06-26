@@ -31,6 +31,17 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Embed Google OAuth credentials
+        shell: bash
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          if [ -n "$GOOGLE_CLIENT_ID" ] && [ -n "$GOOGLE_CLIENT_SECRET" ]; then
+            printf '{"google_client_id":"%s","google_client_secret":"%s"}\n' \
+              "$GOOGLE_CLIENT_ID" "$GOOGLE_CLIENT_SECRET" > deduper-oauth.json
+          fi
+
       - name: Build, sign, and publish release
         uses: tauri-apps/tauri-action@v0
         env:
