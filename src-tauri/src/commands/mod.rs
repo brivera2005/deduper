@@ -16,6 +16,8 @@ use crate::scanner::{engine, mtp, SourceRecord, SourceType};
 use crate::state::AppState;
 use crate::watcher;
 
+use open;
+
 #[derive(Debug, Serialize)]
 pub struct DashboardStats {
     pub recoverable_bytes: i64,
@@ -39,6 +41,24 @@ pub struct RecoverySample {
     pub filename: String,
     pub size_bytes: i64,
     pub drive_file_id: String,
+    pub copy_already_on_pc: Option<String>,
+    pub copy_location_label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditRecommendations {
+    pub google_drive_duplicate_bytes: i64,
+    pub google_drive_duplicate_count: i64,
+    pub google_drive_only_bytes: i64,
+    pub google_drive_only_count: i64,
+    pub phone_only_bytes: i64,
+    pub phone_only_count: i64,
+    pub google_photos_count: i64,
+    pub gmail_attachment_bytes: i64,
+    pub gmail_attachment_count: i64,
+    pub total_files_checked: i64,
+    pub proof_samples: Vec<RecoverySample>,
+    pub summary_plain: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +92,8 @@ pub struct WizardStatus {
 pub struct CopyResult {
     pub copied_count: i64,
     pub skipped_count: i64,
+    pub verified_count: i64,
+    pub failed_count: i64,
     pub dry_run: bool,
     pub destination: String,
 }
@@ -272,7 +294,7 @@ pub fn start_scan(
         if let Err(e) =
             engine::run_scan(state_clone.clone(), source_id_for_thread.clone(), job_id_clone.clone())
         {
-            let _ = update_job_failed(&state_clone, &job_id_clone, &e);
+            let _ = engine::update_job_failed(&state_clone, &job_id_clone, &e);
             let mut active = state_clone.active_scan.lock().unwrap();
             if let Some(ref mut p) = *active {
                 p.status = "failed".into();
@@ -300,15 +322,7 @@ pub fn start_scan(
 }
 
 fn update_job_failed(state: &AppState, job_id: &str, error: &str) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.with_conn(|conn| {
-        conn.execute(
-            "UPDATE scan_jobs SET status = 'failed', error_message = ?1, completed_at = ?2 WHERE id = ?3",
-            params![error, now_iso(), job_id],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    engine::update_job_failed(state, job_id, error)
 }
 
 #[tauri::command]
@@ -395,15 +409,38 @@ pub fn get_recovery_report(state: tauri::State<'_, Arc<AppState>>) -> Result<Rec
         )?;
 
         let mut stmt = conn.prepare(
-            "SELECT filename, size_bytes, drive_file_id FROM recovery_candidates
-             WHERE verified_safe = 1 ORDER BY size_bytes DESC LIMIT 10",
+            "SELECT rc.filename, rc.size_bytes, rc.drive_file_id,
+                    l.relative_path, s.source_type, s.name, s.config_json
+             FROM recovery_candidates rc
+             JOIN files l ON rc.matched_local_file_id = l.id
+             JOIN sources s ON l.source_id = s.id
+             WHERE rc.verified_safe = 1
+             ORDER BY rc.size_bytes DESC LIMIT 10",
         )?;
         let sample_files: Vec<RecoverySample> = stmt
             .query_map([], |row| {
+                let relative_path: String = row.get(3)?;
+                let source_type: String = row.get(4)?;
+                let source_name: String = row.get(5)?;
+                let config_str: String = row.get(6)?;
+                let config: serde_json::Value =
+                    serde_json::from_str(&config_str).unwrap_or(serde_json::json!({}));
+                let local_path = crate::scanner::vault::resolve_local_path(
+                    &source_type,
+                    &config,
+                    &relative_path,
+                )
+                .map(|p| p.to_string_lossy().into_owned());
+
                 Ok(RecoverySample {
                     filename: row.get(0)?,
                     size_bytes: row.get(1)?,
                     drive_file_id: row.get(2)?,
+                    copy_already_on_pc: local_path,
+                    copy_location_label: Some(crate::scanner::vault::source_label(
+                        &source_type,
+                        &source_name,
+                    )),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -413,9 +450,149 @@ pub fn get_recovery_report(state: tauri::State<'_, Arc<AppState>>) -> Result<Rec
             recoverable_bytes,
             recoverable_count,
             sample_files,
-            safety_note: "These Drive files are verified duplicates of files on your PC or phone import. \
-                          Deduper never auto-deletes. Review the report, then optionally move to Drive Trash with explicit confirmation."
+            safety_note: "These files are on Google Drive AND already saved on your PC or phone (we checked — same file fingerprint). \
+                          Deduper never deletes anything for you. You can remove the Google Drive copies yourself to free space, \
+                          or wait for a future \"Move to Google Drive Trash\" button with your OK."
                 .into(),
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_audit_recommendations(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AuditRecommendations, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.with_conn(|conn| {
+        let google_drive_duplicate_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes),0) FROM recovery_candidates WHERE verified_safe = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let google_drive_duplicate_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recovery_candidates WHERE verified_safe = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let google_drive_only_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(f.size_bytes),0) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type = 'google_drive' AND f.confidence = 'unique'",
+            [],
+            |row| row.get(0),
+        )?;
+        let google_drive_only_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type = 'google_drive' AND f.confidence = 'unique'",
+            [],
+            |row| row.get(0),
+        )?;
+        let phone_only_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(f.size_bytes),0) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type IN ('android_mtp', 'phone_import') AND f.confidence = 'unique'",
+            [],
+            |row| row.get(0),
+        )?;
+        let phone_only_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type IN ('android_mtp', 'phone_import') AND f.confidence = 'unique'",
+            [],
+            |row| row.get(0),
+        )?;
+        let google_photos_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type = 'google_photos'",
+            [],
+            |row| row.get(0),
+        )?;
+        let gmail_attachment_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(f.size_bytes),0) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type = 'gmail_attachments'",
+            [],
+            |row| row.get(0),
+        )?;
+        let gmail_attachment_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files f
+             JOIN sources s ON f.source_id = s.id
+             WHERE s.source_type = 'gmail_attachments'",
+            [],
+            |row| row.get(0),
+        )?;
+        let total_files_checked: i64 =
+            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT rc.filename, rc.size_bytes, rc.drive_file_id,
+                    l.relative_path, s.source_type, s.name, s.config_json
+             FROM recovery_candidates rc
+             JOIN files l ON rc.matched_local_file_id = l.id
+             JOIN sources s ON l.source_id = s.id
+             WHERE rc.verified_safe = 1
+             ORDER BY rc.size_bytes DESC LIMIT 8",
+        )?;
+        let proof_samples: Vec<RecoverySample> = stmt
+            .query_map([], |row| {
+                let relative_path: String = row.get(3)?;
+                let source_type: String = row.get(4)?;
+                let source_name: String = row.get(5)?;
+                let config_str: String = row.get(6)?;
+                let config: serde_json::Value =
+                    serde_json::from_str(&config_str).unwrap_or(serde_json::json!({}));
+                let local_path = crate::scanner::vault::resolve_local_path(
+                    &source_type,
+                    &config,
+                    &relative_path,
+                )
+                .map(|p| p.to_string_lossy().into_owned());
+
+                Ok(RecoverySample {
+                    filename: row.get(0)?,
+                    size_bytes: row.get(1)?,
+                    drive_file_id: row.get(2)?,
+                    copy_already_on_pc: local_path,
+                    copy_location_label: Some(crate::scanner::vault::source_label(
+                        &source_type,
+                        &source_name,
+                    )),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let dup_gb = google_drive_duplicate_bytes as f64 / 1024f64.powi(3);
+        let summary_plain = if google_drive_duplicate_count > 0 {
+            format!(
+                "You can free up about {:.1} GB on Google Drive — {} files are already saved on your PC or phone.",
+                dup_gb,
+                google_drive_duplicate_count
+            )
+        } else if total_files_checked == 0 {
+            "Run a full check first to see your results.".into()
+        } else {
+            "No exact duplicates found between Google Drive and your PC/phone yet. \
+             Files only on Google Drive can still be copied to your PC folder."
+                .into()
+        };
+
+        Ok(AuditRecommendations {
+            google_drive_duplicate_bytes,
+            google_drive_duplicate_count,
+            google_drive_only_bytes,
+            google_drive_only_count,
+            phone_only_bytes,
+            phone_only_count,
+            google_photos_count,
+            gmail_attachment_bytes,
+            gmail_attachment_count,
+            total_files_checked,
+            proof_samples,
+            summary_plain,
         })
     })
     .map_err(|e| e.to_string())
@@ -426,21 +603,27 @@ pub fn copy_uniques_to_vault(
     state: tauri::State<'_, Arc<AppState>>,
     destination: String,
     dry_run: bool,
+    include_google_drive: Option<bool>,
+    include_phone: Option<bool>,
+    include_this_pc: Option<bool>,
 ) -> Result<CopyResult, String> {
     let dest = PathBuf::from(&destination);
     if !dry_run {
         fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
     }
 
+    let include_drive = include_google_drive.unwrap_or(true);
+    let include_phone = include_phone.unwrap_or(true);
+    let include_pc = include_this_pc.unwrap_or(true);
+
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let files: Vec<(String, String, String)> = db
+    let files: Vec<(String, String, String, Option<String>, String, String)> = db
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT f.id, f.filename, s.config_json
+                "SELECT f.id, f.filename, f.relative_path, f.drive_file_id, s.source_type, s.config_json
                  FROM files f
                  JOIN sources s ON f.source_id = s.id
-                 WHERE f.confidence = 'unique'
-                 AND s.source_type IN ('local', 'phone_import', 'google_drive')",
+                 WHERE f.confidence = 'unique'",
             )?;
             let rows = stmt
                 .query_map([], |row| {
@@ -448,6 +631,9 @@ pub fn copy_uniques_to_vault(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 })?
                 .filter_map(|r| r.ok())
@@ -455,30 +641,87 @@ pub fn copy_uniques_to_vault(
             Ok(rows)
         })
         .map_err(|e| e.to_string())?;
+    drop(db);
 
     let mut copied = 0i64;
     let mut skipped = 0i64;
+    let mut verified = 0i64;
+    let mut failed = 0i64;
 
-    for (_id, filename, config_str) in files {
+    for (_id, filename, relative_path, drive_file_id, source_type_str, config_str) in files {
+        let source_type = SourceType::from_str(&source_type_str);
+        let Some(source_type) = source_type else {
+            skipped += 1;
+            continue;
+        };
+
+        let allowed = match source_type {
+            SourceType::GoogleDrive => include_drive,
+            SourceType::AndroidMtp | SourceType::PhoneImport => include_phone,
+            SourceType::Local => include_pc,
+            SourceType::GooglePhotos | SourceType::GmailAttachments => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if !allowed {
+            skipped += 1;
+            continue;
+        }
+
         let config: serde_json::Value =
             serde_json::from_str(&config_str).unwrap_or(serde_json::json!({}));
-        if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
-            let src = PathBuf::from(path).join(&filename);
-            if !src.exists() {
+
+        use crate::scanner::vault::{self, VaultCopyOutcome};
+
+        let outcome = if source_type == SourceType::GoogleDrive {
+            let Some(file_id) = drive_file_id else {
                 skipped += 1;
                 continue;
+            };
+            match vault::download_drive_file_to_vault(
+                &state,
+                &file_id,
+                &dest,
+                &relative_path,
+                &filename,
+                dry_run,
+            ) {
+                Ok(o) => o,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
             }
-            let dst = dest.join(&filename);
-            if dst.exists() {
-                skipped += 1;
-                continue;
-            }
-            if !dry_run {
-                fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-            }
-            copied += 1;
         } else {
-            skipped += 1;
+            let Some(src) = vault::resolve_local_path(&source_type_str, &config, &relative_path)
+            else {
+                skipped += 1;
+                continue;
+            };
+            match vault::copy_file_to_vault(
+                &src,
+                &dest,
+                &source_type,
+                &relative_path,
+                &filename,
+                dry_run,
+            ) {
+                Ok(o) => o,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            }
+        };
+
+        match outcome {
+            VaultCopyOutcome::Skipped => skipped += 1,
+            VaultCopyOutcome::Copied => copied += 1,
+            VaultCopyOutcome::Verified => {
+                copied += 1;
+                verified += 1;
+            }
         }
     }
 
@@ -486,6 +729,7 @@ pub fn copy_uniques_to_vault(
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.with_conn(|conn| set_setting(conn, "vault_path", &destination))
             .map_err(|e| e.to_string())?;
+        config::set_vault_path(&state.data_dir, destination.clone())?;
     }
 
     audit::log_action(
@@ -495,6 +739,8 @@ pub fn copy_uniques_to_vault(
             "destination": destination,
             "copied": copied,
             "skipped": skipped,
+            "verified": verified,
+            "failed": failed,
         }),
         dry_run,
     )?;
@@ -502,9 +748,94 @@ pub fn copy_uniques_to_vault(
     Ok(CopyResult {
         copied_count: copied,
         skipped_count: skipped,
+        verified_count: verified,
+        failed_count: failed,
         dry_run,
         destination,
     })
+}
+
+#[tauri::command]
+pub fn start_full_audit(
+    state: tauri::State<'_, Arc<AppState>>,
+    include_google_drive: Option<bool>,
+    include_google_photos: Option<bool>,
+    include_gmail: Option<bool>,
+    include_this_pc: Option<bool>,
+    include_phone: Option<bool>,
+) -> Result<String, String> {
+    ensure_vault_local_source(&state)?;
+
+    let job_id = Uuid::new_v4().to_string();
+    let options = crate::scanner::full_audit::FullAuditOptions {
+        include_google_drive: include_google_drive.unwrap_or(true),
+        include_google_photos: include_google_photos.unwrap_or(true),
+        include_gmail: include_gmail.unwrap_or(true),
+        include_this_pc: include_this_pc.unwrap_or(true),
+        include_phone: include_phone.unwrap_or(true),
+    };
+
+    state.reset_full_audit_cancel();
+    state.reset_scan_cancel();
+
+    let state_clone = Arc::clone(&state);
+    let job_id_clone = job_id.clone();
+
+    thread::spawn(move || {
+        if let Err(e) = crate::scanner::full_audit::run_full_audit(
+            state_clone.clone(),
+            job_id_clone.clone(),
+            options,
+        ) {
+            let _ = crate::scanner::full_audit::update_audit_progress(
+                &state_clone,
+                &job_id_clone,
+                "failed",
+                "error",
+                "Something went wrong during the full check.",
+                0,
+                0,
+                None,
+                None,
+                0,
+                0,
+                Some(&e),
+            );
+        }
+    });
+
+    audit::log_action(
+        &state,
+        "full_audit_started",
+        &serde_json::json!({ "job_id": job_id }),
+        true,
+    )?;
+
+    Ok(job_id)
+}
+
+#[tauri::command]
+pub fn get_full_audit_status(
+    state: tauri::State<'_, Arc<AppState>>,
+    job_id: Option<String>,
+) -> Result<Option<crate::scanner::full_audit::FullAuditProgress>, String> {
+    let guard = state.active_full_audit.lock().map_err(|e| e.to_string())?;
+    if let Some(ref progress) = *guard {
+        if job_id
+            .as_ref()
+            .map(|j| j == &progress.job_id)
+            .unwrap_or(true)
+        {
+            return Ok(Some(progress.clone()));
+        }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+pub fn cancel_full_audit(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.request_full_audit_cancel();
+    audit::log_action(&state, "full_audit_cancelled", &serde_json::json!({}), true)
 }
 
 #[tauri::command]
@@ -679,6 +1010,9 @@ fn apply_vault_path(state: &AppState, path: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.with_conn(|conn| set_setting(conn, "vault_path", &path))
         .map_err(|e| e.to_string())?;
+    drop(db);
+
+    ensure_vault_local_source(state)?;
 
     audit::log_action(
         state,
@@ -686,6 +1020,79 @@ fn apply_vault_path(state: &AppState, path: String) -> Result<(), String> {
         &serde_json::json!({ "path": path }),
         true,
     )
+}
+
+fn ensure_vault_local_source(state: &AppState) -> Result<(), String> {
+    let vault = {
+        let cfg = AppConfig::load(&state.data_dir);
+        if let Some(p) = cfg.vault_path {
+            Some(p)
+        } else {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            db.with_conn(|conn| get_setting(conn, "vault_path"))
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    let Some(vault_path) = vault else {
+        return Ok(());
+    };
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let exists: i64 = db
+        .with_conn(|conn| {
+            let pattern = format!("%{}%", vault_path.replace('\\', "\\\\"));
+            conn.query_row(
+                "SELECT COUNT(*) FROM sources WHERE source_type = 'local' AND config_json LIKE ?1",
+                params![pattern],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .map_err(|e| e.to_string())?;
+
+    if exists > 0 {
+        return Ok(());
+    }
+    drop(db);
+
+    let _ = add_local_source_internal(state, vault_path, Some("My PC photo folder".into()))?;
+    Ok(())
+}
+
+fn add_local_source_internal(
+    state: &AppState,
+    path: String,
+    name: Option<String>,
+) -> Result<SourceRecord, String> {
+    let path_buf = PathBuf::from(&path);
+    crate::scanner::local::validate_folder(&path_buf)?;
+
+    let id = Uuid::new_v4().to_string();
+    let display_name = name.unwrap_or_else(|| "My PC photo folder".to_string());
+    let config = serde_json::json!({ "path": path });
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO sources (id, source_type, name, config_json, status, created_at)
+             VALUES (?1, 'local', ?2, ?3, 'idle', ?4)",
+            params![id, display_name, config.to_string(), now_iso()],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    Ok(SourceRecord {
+        id,
+        source_type: SourceType::Local,
+        name: display_name,
+        config,
+        status: "idle".into(),
+        last_scan_at: None,
+        file_count: 0,
+        total_bytes: 0,
+    })
 }
 
 #[tauri::command]
@@ -846,4 +1253,56 @@ pub fn connect_android_device(
 #[tauri::command]
 pub fn get_android_status() -> Result<Vec<mtp::MtpDeviceInfo>, String> {
     Ok(mtp::get_mtp_status())
+}
+
+#[tauri::command]
+pub fn get_google_storage_quota(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<drive::StorageQuota, String> {
+    drive::get_storage_quota(&state)
+}
+
+#[tauri::command]
+pub fn connect_google_cleanup(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<drive::DriveAuthStatus, String> {
+    drive::connect_cleanup_blocking(Arc::clone(&state))
+}
+
+#[tauri::command]
+pub fn move_duplicates_to_trash(
+    state: tauri::State<'_, Arc<AppState>>,
+    dry_run: bool,
+    confirmation: String,
+) -> Result<drive::TrashResult, String> {
+    if !dry_run && confirmation.trim().to_uppercase() != "MOVE TO TRASH" {
+        return Err("Type MOVE TO TRASH exactly to confirm.".into());
+    }
+    drive::move_recovery_candidates_to_trash(&state, dry_run)
+}
+
+#[tauri::command]
+pub fn export_audit_receipt(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<crate::reports::ExportReceiptResult, String> {
+    crate::reports::export_audit_receipt(&state)
+}
+
+#[tauri::command]
+pub fn open_receipt_folder(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    let vault = AppConfig::load(&state.data_dir)
+        .vault_path
+        .or_else(|| {
+            let db = state.db.lock().ok()?;
+            db.with_conn(|conn| get_setting(conn, "vault_path"))
+                .ok()
+                .flatten()
+        });
+    let dir = if let Some(v) = vault {
+        PathBuf::from(v).join("_deduper").join("receipts")
+    } else {
+        state.data_dir.join("receipts")
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(&dir).map_err(|e| e.to_string())
 }

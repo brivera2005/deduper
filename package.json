@@ -1,6 +1,6 @@
 {
   "name": "deduper",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Safe media deduplication across Android, Google Drive, and PC — free up Drive space without losing anything",
   "type": "module",
   "scripts": {

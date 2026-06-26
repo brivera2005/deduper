@@ -1,7 +1,11 @@
 pub mod drive;
 pub mod engine;
+pub mod full_audit;
+pub mod gmail;
 pub mod local;
 pub mod mtp;
+pub mod photos;
+pub mod vault;
 
 use std::path::PathBuf;
 
@@ -13,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub enum SourceType {
     Local,
     GoogleDrive,
+    GooglePhotos,
+    GmailAttachments,
     AndroidMtp,
     PhoneImport,
 }
@@ -22,6 +28,8 @@ impl SourceType {
         match self {
             Self::Local => "local",
             Self::GoogleDrive => "google_drive",
+            Self::GooglePhotos => "google_photos",
+            Self::GmailAttachments => "gmail_attachments",
             Self::AndroidMtp => "android_mtp",
             Self::PhoneImport => "phone_import",
         }
@@ -31,6 +39,8 @@ impl SourceType {
         match s {
             "local" => Some(Self::Local),
             "google_drive" => Some(Self::GoogleDrive),
+            "google_photos" => Some(Self::GooglePhotos),
+            "gmail_attachments" => Some(Self::GmailAttachments),
             "android_mtp" => Some(Self::AndroidMtp),
             "phone_import" => Some(Self::PhoneImport),
             _ => None,
@@ -42,6 +52,7 @@ impl SourceType {
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     VerifiedDuplicate,
+    LikelyDuplicate,
     Unique,
     Unknown,
 }
@@ -50,6 +61,7 @@ impl Confidence {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::VerifiedDuplicate => "verified_duplicate",
+            Self::LikelyDuplicate => "likely_duplicate",
             Self::Unique => "unique",
             Self::Unknown => "unknown",
         }
@@ -58,6 +70,7 @@ impl Confidence {
     pub fn from_str(s: &str) -> Self {
         match s {
             "verified_duplicate" => Self::VerifiedDuplicate,
+            "likely_duplicate" => Self::LikelyDuplicate,
             "unique" => Self::Unique,
             _ => Self::Unknown,
         }

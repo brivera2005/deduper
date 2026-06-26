@@ -47,6 +47,7 @@ interface MtpDeviceInfo {
 
 interface SetupWizardProps {
   onComplete: () => void;
+  onRunFirstCheck?: () => void;
   onSkip: () => void;
   forceOpen?: boolean;
 }
@@ -81,7 +82,7 @@ function WhyBlock({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps) {
+export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: SetupWizardProps) {
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<WizardStatus | null>(null);
   const [googleId, setGoogleId] = useState("");
@@ -214,6 +215,7 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
     try {
       await invoke("complete_wizard", { skipped });
       if (skipped) onSkip();
+      else if (onRunFirstCheck) onRunFirstCheck();
       else onComplete();
     } catch (e) {
       setError(String(e));
@@ -252,13 +254,14 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
           <>
             <h2>Welcome to Deduper</h2>
             <p>
-              We'll walk you through a few quick steps to find duplicate photos and videos
-              across your phone, Google Drive, and PC — then safely copy the unique ones to
-              one folder. Nothing gets deleted without your OK.
+              We'll help you free up space on <strong>Google Drive</strong> (your online Google
+              storage) by finding photos and videos you already have on your <strong>PC</strong> or{" "}
+              <strong>phone</strong>. Nothing gets deleted without your OK.
             </p>
-            <WhyBlock title="What does Deduper do?">
-              It compares your files by content (not just names) and shows you what's duplicated
-              and what's safe to remove from Google Drive to free up space.
+            <WhyBlock title="What is Google Drive?">
+              Google Drive is where Google stores your files online — it shares the same space as
+              Gmail and Google Photos on your account. When Deduper says &quot;Google Drive,&quot;
+              we mean files saved in your Google account online, not on your computer.
             </WhyBlock>
           </>
         )}
@@ -267,24 +270,25 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
           <>
             <h2>
               <Shield size={22} style={{ verticalAlign: "middle", marginRight: 8 }} />
-              How it works — and what we never do
+              How it works — simple and safe
             </h2>
             <ul className="wizard-list">
               <li>
-                <strong>We never auto-delete.</strong> Deduper only shows you a report. You decide
-                what happens.
+                <strong>We never delete anything.</strong> Deduper only shows you a report. You
+                decide what to do.
               </li>
               <li>
-                <strong>Read-only Google access.</strong> We list your Drive files to compare them —
-                we don't change anything unless you explicitly ask later.
+                <strong>Google Drive is read-only.</strong> We list your online files to compare
+                them — we don't change anything unless you ask later.
               </li>
               <li>
-                <strong>Your vault folder</strong> is where unique files get copied on your PC.
+                <strong>Your PC photo folder</strong> is where we save copies of files that only
+                exist in one place.
               </li>
             </ul>
             <WhyBlock title="Why is this safe?">
-              Every action is logged. Cleanup is report-only by default. Even optional Drive trash
-              moves require a separate confirmation step.
+              Every step is logged. We fingerprint each file (like a unique ID) so we know it's
+              the same photo — not just the same name.
             </WhyBlock>
           </>
         )}
@@ -293,12 +297,12 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
           <>
             <h2>
               <FolderOpen size={22} style={{ verticalAlign: "middle", marginRight: 8 }} />
-              Pick your PC vault folder
+              Pick your PC photo folder
             </h2>
             <p>
-              Choose a folder on this computer where Deduper will copy your unique photos and
-              videos. Pick something with plenty of free space — like{" "}
-              <code>D:\PhotoVault</code> or your Pictures folder.
+              Choose a folder on <strong>this computer</strong> with plenty of free space. This is
+              where Deduper saves photos and videos that aren't already backed up. Example:{" "}
+              <code>D:\DadPhotos</code> or your Pictures folder.
             </p>
             {vaultPath ? (
               <div className="wizard-highlight">
@@ -310,9 +314,10 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
             <button className="btn btn-secondary" onClick={pickVault} disabled={busy}>
               Choose folder…
             </button>
-            <WhyBlock title="What is the vault?">
-              It's your master backup folder. After scanning, Deduper copies files that exist
-              nowhere else into this folder so you have one safe copy on your PC.
+            <WhyBlock title="What is this folder?">
+              Think of it as your master backup on this PC. After checking, Deduper saves files
+              that only exist on Google Drive or your phone into this folder — one safe copy at
+              home.
             </WhyBlock>
           </>
         )}
@@ -330,9 +335,8 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
             ) : (
               <>
                 <p>
-                  Click <strong>Connect Google Drive</strong> to sign in with your Google account in
-                  your browser. Deduper only gets read-only access to compare your photos — nothing
-                  is deleted automatically.
+                  Click below to sign in with your Google account in your browser. Deduper only
+                  reads your Google Drive file list — nothing is deleted automatically.
                 </p>
                 <button
                   className="btn btn-primary btn-lg"
@@ -471,24 +475,23 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
           <>
             <h2>
               <Moon size={22} style={{ verticalAlign: "middle", marginRight: 8 }} />
-              Your first scan
+              Ready to check everything
             </h2>
             <p>
-              After setup, go to the dashboard and click <strong>Scan</strong> on each source
-              (PC folder, Google Drive, phone). The first scan can take a while — especially
-              for large Google Drive accounts or phones with lots of photos.
+              On the main screen, click <strong>Check all my photos &amp; videos</strong> — one
+              button scans Google Drive, this PC, and your phone (if plugged in). The first check
+              can take a while for large accounts.
             </p>
             <div className="wizard-tip">
               <Sparkles size={16} />
               <span>
-                <strong>Tip:</strong> Start a scan before bed and let it run overnight. Deduper
-                saves progress, so you can pause and resume if needed.
+                <strong>Tip:</strong> Start before bed and let it run overnight. Deduper saves
+                progress so you can stop and continue later.
               </span>
             </div>
-            <WhyBlock title="Why does scanning take time?">
-              Deduper reads every file's content to find true duplicates — not just matching
-              filenames. Google Drive scans use file fingerprints from Google; phone scans read
-              files over USB which can be slower.
+            <WhyBlock title="Why does it take time?">
+              We read every photo and video to make sure it's a true duplicate — not just the same
+              file name. Google Drive is fast; reading files from your phone over USB takes longer.
             </WhyBlock>
           </>
         )}
@@ -498,19 +501,22 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
             <h2>You're all set!</h2>
             <ul className="wizard-summary">
               <li className={vaultPath ? "done" : ""}>
-                Vault folder: {vaultPath ?? "Not set"}
+                PC photo folder: {vaultPath ?? "Not set"}
               </li>
               <li className={driveAuth?.connected || status?.drive_connected ? "done" : ""}>
                 Google Drive:{" "}
                 {driveAuth?.connected || status?.drive_connected
                   ? driveAuth?.email ?? status?.drive_email ?? "Connected"
-                  : "Skipped"}
+                  : "Skipped — connect later in Setup"}
               </li>
               <li className={status?.android_connected ? "done" : ""}>
-                Android phone: {status?.android_connected ? status.android_device_name : "Skipped"}
+                Phone: {status?.android_connected ? status.android_device_name : "Skipped — plug in later"}
               </li>
             </ul>
-            <p>Head to the dashboard to start scanning. Remember — nothing gets deleted automatically.</p>
+            <p>
+              Click <strong>Check all my photos &amp; videos</strong> on the main screen. Remember
+              — we never delete anything for you.
+            </p>
           </>
         )}
 
@@ -541,7 +547,7 @@ export function SetupWizard({ onComplete, onSkip, forceOpen }: SetupWizardProps)
             </>
           ) : (
             <button type="button" className="btn btn-primary" onClick={() => finishWizard(false)} disabled={busy}>
-              Go to dashboard
+              Check all my photos &amp; videos
             </button>
           )}
         </div>
