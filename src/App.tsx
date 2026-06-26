@@ -161,6 +161,27 @@ function formatCount(n: number): string {
   return n.toLocaleString();
 }
 
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins < 60) return `${mins}m ${secs}s`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hrs}h ${remMins}m`;
+}
+
+function auditProgressPercent(fullAudit: FullAuditProgress): number {
+  if (fullAudit.sources_total <= 0) return fullAudit.status === "running" ? 8 : 0;
+  const slice = 100 / fullAudit.sources_total;
+  const base = fullAudit.sources_done * slice;
+  if (fullAudit.files_total > 0) {
+    const inSlice = (fullAudit.files_processed / fullAudit.files_total) * slice;
+    return Math.min(99, Math.round(base + inSlice));
+  }
+  return Math.min(99, Math.round(base + slice * 0.15));
+}
+
 export default function App() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
@@ -174,6 +195,8 @@ export default function App() {
   const [androidDevices, setAndroidDevices] = useState<MtpDeviceInfo[]>([]);
   const [fullAuditJobId, setFullAuditJobId] = useState<string | null>(null);
   const [fullAudit, setFullAudit] = useState<FullAuditProgress | null>(null);
+  const [auditElapsedSec, setAuditElapsedSec] = useState(0);
+  const [auditLastTickAt, setAuditLastTickAt] = useState<number | null>(null);
   const [auditOptions, setAuditOptions] = useState<AuditOptions>({
     includeGoogleDrive: true,
     includeGooglePhotos: true,
@@ -266,6 +289,20 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!fullAuditJobId) {
+      setAuditElapsedSec(0);
+      setAuditLastTickAt(null);
+      return;
+    }
+    const started = Date.now();
+    setAuditLastTickAt(started);
+    const clock = setInterval(() => {
+      setAuditElapsedSec(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => clearInterval(clock);
+  }, [fullAuditJobId]);
+
+  useEffect(() => {
     if (!fullAuditJobId) return;
     const interval = setInterval(async () => {
       try {
@@ -273,7 +310,20 @@ export default function App() {
           jobId: fullAuditJobId,
         });
         if (progress) {
-          setFullAudit(progress);
+          setFullAudit((prev) => {
+            if (
+              prev &&
+              (progress.files_processed !== prev.files_processed ||
+                progress.message !== prev.message ||
+                progress.sources_done !== prev.sources_done ||
+                progress.current_file !== prev.current_file)
+            ) {
+              setAuditLastTickAt(Date.now());
+            } else if (!prev) {
+              setAuditLastTickAt(Date.now());
+            }
+            return progress;
+          });
           if (["completed", "failed", "cancelled"].includes(progress.status)) {
             setFullAuditJobId(null);
             setBusy(false);
@@ -488,12 +538,14 @@ export default function App() {
 
   const androidSource = sources.find((s) => s.source_type === "android_mtp");
   const auditRunning = !!fullAuditJobId;
-  const auditPct =
+  const auditPct = fullAudit ? auditProgressPercent(fullAudit) : 0;
+  const auditStep =
     fullAudit && fullAudit.sources_total > 0
-      ? Math.round((fullAudit.sources_done / fullAudit.sources_total) * 100)
-      : fullAudit?.status === "running"
-        ? 8
-        : 0;
+      ? Math.min(fullAudit.sources_done + 1, fullAudit.sources_total)
+      : 0;
+  const auditStaleSec =
+    auditLastTickAt != null ? Math.floor((Date.now() - auditLastTickAt) / 1000) : 0;
+  const auditLooksStuck = auditRunning && auditStaleSec > 120;
 
   const dashboardBlocked = showWizard && !setup?.wizard_skipped;
 
@@ -701,14 +753,47 @@ export default function App() {
 
           {fullAudit && auditRunning && (
             <div className="progress-panel inline-progress">
+              <div className="progress-live-head">
+                <span className="progress-live-dot" aria-hidden />
+                <span>
+                  Running for {formatElapsed(auditElapsedSec)}
+                  {fullAudit.sources_total > 0 && (
+                    <> · Step {auditStep} of {fullAudit.sources_total}</>
+                  )}
+                </span>
+              </div>
               <div style={{ fontSize: "0.95rem", marginBottom: "0.35rem" }}>{fullAudit.message}</div>
               {fullAudit.current_source_name && (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
                   Now: {fullAudit.current_source_name}
                 </div>
               )}
+              {fullAudit.files_total > 0 && (
+                <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: "0.25rem" }}>
+                  {formatCount(fullAudit.files_processed)} of {formatCount(fullAudit.files_total)} files
+                  checked
+                </div>
+              )}
+              {fullAudit.current_file && (
+                <div className="progress-current-file" title={fullAudit.current_file}>
+                  Latest: {fullAudit.current_file}
+                </div>
+              )}
               <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${auditPct}%` }} />
+                <div className="progress-fill progress-fill-animated" style={{ width: `${auditPct}%` }} />
+              </div>
+              <div style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "0.45rem" }}>
+                {auditLooksStuck ? (
+                  <>
+                    No new progress in {formatElapsed(auditStaleSec)} — large Google accounts can take
+                    30–60+ minutes. If this stays stuck over 10 minutes, click Stop and try again.
+                  </>
+                ) : (
+                  <>
+                    Still working — Google Photos and Gmail can take a while on a full 200 GB account.
+                    {fullAudit.files_processed > 0 && " File count above updates every few seconds."}
+                  </>
+                )}
               </div>
             </div>
           )}

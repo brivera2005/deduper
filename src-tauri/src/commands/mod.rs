@@ -820,16 +820,38 @@ pub fn get_full_audit_status(
     job_id: Option<String>,
 ) -> Result<Option<crate::scanner::full_audit::FullAuditProgress>, String> {
     let guard = state.active_full_audit.lock().map_err(|e| e.to_string())?;
-    if let Some(ref progress) = *guard {
+    let mut progress = if let Some(ref progress) = *guard {
         if job_id
             .as_ref()
             .map(|j| j == &progress.job_id)
             .unwrap_or(true)
         {
-            return Ok(Some(progress.clone()));
+            Some(progress.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    drop(guard);
+
+    if let Some(ref mut p) = progress {
+        if p.status == "running" {
+            if let Ok(scan_guard) = state.active_scan.lock() {
+                if let Some(ref scan) = *scan_guard {
+                    if scan.total_files > 0 {
+                        p.files_total = scan.total_files;
+                    }
+                    p.files_processed = scan.processed_files.max(p.files_processed);
+                    if let Some(ref file) = scan.current_file {
+                        p.current_file = Some(file.clone());
+                    }
+                }
+            }
         }
     }
-    Ok(None)
+
+    Ok(progress)
 }
 
 #[tauri::command]

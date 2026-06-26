@@ -1,6 +1,6 @@
 [package]
 name = "deduper"
-version = "1.0.5"
+version = "1.0.6"
 description = "Safe media deduplication across Android, Google Drive, and PC"
 authors = ["Benjamin"]
 edition = "2021"
