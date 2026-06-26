@@ -1149,33 +1149,58 @@ pub fn get_vault_path(state: tauri::State<'_, Arc<AppState>>) -> Result<Option<S
 }
 
 #[tauri::command]
-pub fn detect_android_devices() -> Result<Vec<mtp::MtpDeviceInfo>, String> {
-    let devices = mtp::get_mtp_status();
-    if devices.is_empty() {
-        return Err(
-            "No phone found. Plug in your Android phone via USB, unlock it, and choose \
-             \"File transfer\" or \"Transfer files\" on the phone notification."
-                .into(),
-        );
-    }
-    Ok(devices)
+pub async fn detect_android_devices() -> Result<Vec<mtp::MtpDeviceInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let devices = mtp::get_mtp_status();
+        if devices.is_empty() {
+            return Err(
+                "No phone found. Plug in your Android phone via USB, unlock it, and choose \
+                 \"File transfer\" or \"Transfer files\" on the phone notification."
+                    .into(),
+            );
+        }
+        Ok(devices)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn connect_android_device(
+pub async fn connect_android_device(
     state: tauri::State<'_, Arc<AppState>>,
     storage_path: String,
     device_name: Option<String>,
 ) -> Result<SourceRecord, String> {
-    mtp::validate_device_connected(&storage_path)?;
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        connect_android_device_sync(&state, storage_path, device_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
+fn connect_android_device_sync(
+    state: &AppState,
+    storage_path: String,
+    device_name: Option<String>,
+) -> Result<SourceRecord, String> {
     let devices = mtp::MtpScanner::detect_devices();
+    if devices.is_empty() {
+        return Err(
+            "No Android phone detected. Plug in your phone via USB, unlock it, and choose \
+             \"File transfer\" or \"Transfer files\" (not \"Charge only\")."
+                .into(),
+        );
+    }
     let device = devices
         .iter()
         .find(|d| d.storage_path == storage_path)
-        .ok_or("Phone not found — reconnect and try again")?;
+        .ok_or(
+            "Phone was disconnected or switched out of file transfer mode. Reconnect and try again.",
+        )?;
 
-    let display_name = device_name.unwrap_or_else(|| format!("{} ({})", device.name, device.storage_name));
+    let display_name =
+        device_name.unwrap_or_else(|| format!("{} ({})", device.name, device.storage_name));
     let config = serde_json::json!({
         "device_name": device.name,
         "storage_name": device.storage_name,
@@ -1232,7 +1257,7 @@ pub fn connect_android_device(
     .map_err(|e| e.to_string())?;
 
     audit::log_action(
-        &state,
+        state,
         "android_connected",
         &serde_json::json!({ "device": device.name, "storage": device.storage_name }),
         true,
@@ -1251,8 +1276,10 @@ pub fn connect_android_device(
 }
 
 #[tauri::command]
-pub fn get_android_status() -> Result<Vec<mtp::MtpDeviceInfo>, String> {
-    Ok(mtp::get_mtp_status())
+pub async fn get_android_status() -> Result<Vec<mtp::MtpDeviceInfo>, String> {
+    tauri::async_runtime::spawn_blocking(mtp::get_mtp_status)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
