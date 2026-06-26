@@ -93,6 +93,7 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
   const [androidDevices, setAndroidDevices] = useState<MtpDeviceInfo[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [detectingPhone, setDetectingPhone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [vaultPath, setVaultPath] = useState<string | null>(null);
 
@@ -112,13 +113,8 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
     refresh().catch(console.error);
   }, [refresh]);
 
-  useEffect(() => {
-    if (step === 4) {
-      invoke<MtpDeviceInfo[]>("detect_android_devices")
-        .then(setAndroidDevices)
-        .catch(() => setAndroidDevices([]));
-    }
-  }, [step]);
+  // Phone detection runs PowerShell/COM on Windows — only when the user clicks "Detect phone"
+  // (auto-detect on step enter used to freeze the webview on the main thread).
 
   if (!forceOpen && status?.completed) return null;
 
@@ -175,6 +171,7 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
   };
 
   const detectPhone = async () => {
+    setDetectingPhone(true);
     setBusy(true);
     setError(null);
     try {
@@ -185,6 +182,7 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
       setError(String(e));
       setAndroidDevices([]);
     } finally {
+      setDetectingPhone(false);
       setBusy(false);
     }
   };
@@ -433,8 +431,8 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
               </li>
               <li>Click "Detect phone" below.</li>
             </ol>
-            <button className="btn btn-secondary" onClick={detectPhone} disabled={busy}>
-              Detect phone
+            <button className="btn btn-secondary" onClick={detectPhone} disabled={busy || detectingPhone}>
+              {detectingPhone ? "Detecting phone…" : "Detect phone"}
             </button>
             {androidDevices.length > 0 && (
               <div className="wizard-device-list">
@@ -532,7 +530,12 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
           {step < STEPS.length - 1 ? (
             <>
               {[3, 4].includes(step) && (
-                <button type="button" className="btn btn-ghost" onClick={() => setStep(step + 1)} disabled={busy}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setStep(step + 1)}
+                  disabled={busy || detectingPhone}
+                >
                   Skip this step
                 </button>
               )}
@@ -540,7 +543,7 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
                 type="button"
                 className="btn btn-primary"
                 onClick={() => setStep(step + 1)}
-                disabled={busy || !canNext()}
+                disabled={busy || detectingPhone || !canNext()}
               >
                 Next
               </button>

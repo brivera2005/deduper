@@ -1,7 +1,12 @@
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+
+const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(20);
 
 use super::{is_media_file, ScannedItem, SourceScanner, SourceType};
 
@@ -70,20 +75,10 @@ impl MtpScanner {
 
     pub fn detect_devices() -> Vec<MtpDevice> {
         let script = include_str!("mtp_detect.ps1");
-        let output = match Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                script,
-            ])
-            .output()
-        {
+        let output = match run_powershell_with_timeout(script) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("MTP detect failed to run PowerShell: {e}");
+                eprintln!("MTP detect failed: {e}");
                 return vec![];
             }
         };
@@ -112,17 +107,8 @@ impl MtpScanner {
 
     fn list_files_for_storage(storage_path: &str) -> Result<Vec<MtpFileJson>, String> {
         let script = include_str!("mtp_list_files.ps1");
-        let output = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &format!("$storagePath = '{}'; {script}", escape_ps_single(storage_path)),
-            ])
-            .output()
-            .map_err(|e| format!("failed to run PowerShell: {e}"))?;
+        let command = format!("$storagePath = '{}'; {script}", escape_ps_single(storage_path));
+        let output = run_powershell_with_timeout(&command)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -149,6 +135,68 @@ impl MtpScanner {
 
 fn escape_ps_single(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// Run PowerShell off the UI thread path with a hard timeout so MTP/COM enumeration cannot hang forever.
+fn run_powershell_with_timeout(script: &str) -> Result<std::process::Output, String> {
+    let mut child = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start PowerShell: {e}"))?;
+
+    let stdout_thread = child.stdout.take().map(|mut out| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            out.read_to_end(&mut buf).ok();
+            buf
+        })
+    });
+    let stderr_thread = child.stderr.take().map(|mut err| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            err.read_to_end(&mut buf).ok();
+            buf
+        })
+    });
+
+    let started = Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| format!("waiting for PowerShell: {e}"))?
+        {
+            Some(status) => {
+                let stdout = stdout_thread
+                    .map(|t| t.join().unwrap_or_default())
+                    .unwrap_or_default();
+                let stderr = stderr_thread
+                    .map(|t| t.join().unwrap_or_default())
+                    .unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            None if started.elapsed() >= POWERSHELL_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(
+                    "Phone detection timed out. Unplug and replug your phone, choose File transfer on the phone, then try again.".into(),
+                );
+            }
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 impl SourceScanner for MtpScanner {
