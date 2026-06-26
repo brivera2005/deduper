@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod hash;
 pub mod oauth;
+pub mod reports;
 pub mod scanner;
 pub mod state;
 pub mod watcher;
@@ -90,6 +91,10 @@ pub fn run() {
             commands::disconnect_google_drive,
             commands::get_recovery_report,
             commands::copy_uniques_to_vault,
+            commands::get_audit_recommendations,
+            commands::start_full_audit,
+            commands::get_full_audit_status,
+            commands::cancel_full_audit,
             commands::get_audit_log,
             commands::get_setup_status,
             commands::complete_setup_step,
@@ -105,6 +110,11 @@ pub fn run() {
             commands::detect_android_devices,
             commands::connect_android_device,
             commands::get_android_status,
+            commands::get_google_storage_quota,
+            commands::connect_google_cleanup,
+            commands::move_duplicates_to_trash,
+            commands::export_audit_receipt,
+            commands::open_receipt_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Deduper")

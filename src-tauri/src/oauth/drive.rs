@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use reqwest::blocking::Client;
@@ -6,19 +7,53 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Response, Server};
 
 use crate::audit;
-use crate::db::now_iso;
+use crate::db::{now_iso, set_setting};
 use crate::state::AppState;
 
 const PROVIDER: &str = "google_drive";
-const READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
-const WRITE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
+pub const READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
+pub const PHOTOS_SCOPE: &str = "https://www.googleapis.com/auth/photoslibrary.readonly";
+pub const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub const DRIVE_FULL_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Scopes requested on normal Google sign-in (read-only everywhere).
+pub const READ_SCOPES: &str =
+    "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/photoslibrary.readonly https://www.googleapis.com/auth/gmail.readonly";
+
+/// Additional scope when user enables Google Drive cleanup (move to Trash).
+pub const CLEANUP_SCOPES: &str = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/photoslibrary.readonly https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive";
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DriveAuthStatus {
     pub connected: bool,
     pub email: Option<String>,
     pub scopes: Vec<String>,
-    pub write_enabled: bool,
+    pub cleanup_enabled: bool,
+    pub photos_enabled: bool,
+    pub gmail_enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageQuota {
+    pub limit_bytes: i64,
+    pub usage_bytes: i64,
+    pub usage_in_drive_bytes: i64,
+    pub usage_in_trash_bytes: i64,
+    pub free_bytes: i64,
+    pub usage_display: String,
+    pub limit_display: String,
+    pub free_display: String,
+    pub percent_used: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrashResult {
+    pub trashed_count: i64,
+    pub skipped_count: i64,
+    pub failed_count: i64,
+    pub bytes_freed: i64,
+    pub dry_run: bool,
+    pub quota_after: Option<StorageQuota>,
 }
 
 fn oauth_port() -> u16 {
@@ -30,13 +65,32 @@ fn oauth_port() -> u16 {
 
 fn load_client_credentials(state: &AppState) -> Result<(String, String), String> {
     let cfg = crate::config::AppConfig::load(&state.data_dir);
-    let id = cfg
-        .google_client_id()
-        .ok_or("Google Drive sign-in is not available in this build. Reinstall from a release build, or add your own OAuth app under Advanced in setup.")?;
-    let secret = cfg
-        .google_client_secret()
-        .ok_or("Google Drive sign-in is not available in this build. Reinstall from a release build, or add your own OAuth app under Advanced in setup.")?;
+    let id = cfg.google_client_id().ok_or(
+        "Google sign-in is not available in this build. Reinstall from a release build, or add your own OAuth app under Advanced in setup.",
+    )?;
+    let secret = cfg.google_client_secret().ok_or(
+        "Google sign-in is not available in this build. Reinstall from a release build, or add your own OAuth app under Advanced in setup.",
+    )?;
     Ok((id, secret))
+}
+
+fn stored_scopes(state: &AppState) -> Result<Vec<String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let scopes: String = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT scopes FROM oauth_tokens WHERE provider = ?1",
+                params![PROVIDER],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .map_err(|_| "Google account not connected".to_string())?;
+    Ok(scopes.split_whitespace().map(String::from).collect())
+}
+
+pub fn has_scope(state: &AppState, scope: &str) -> Result<bool, String> {
+    Ok(stored_scopes(state)?.iter().any(|s| s == scope))
 }
 
 pub fn get_auth_status(state: &AppState) -> Result<DriveAuthStatus, String> {
@@ -62,7 +116,9 @@ pub fn get_auth_status(state: &AppState) -> Result<DriveAuthStatus, String> {
             connected: false,
             email: None,
             scopes: vec![],
-            write_enabled: false,
+            cleanup_enabled: false,
+            photos_enabled: false,
+            gmail_enabled: false,
         }),
         Some((token, scopes)) => {
             let scope_list: Vec<String> = scopes.split_whitespace().map(String::from).collect();
@@ -70,7 +126,9 @@ pub fn get_auth_status(state: &AppState) -> Result<DriveAuthStatus, String> {
             Ok(DriveAuthStatus {
                 connected: true,
                 email,
-                write_enabled: scope_list.iter().any(|s| s.contains("drive.file")),
+                cleanup_enabled: scope_list.iter().any(|s| s == DRIVE_FULL_SCOPE),
+                photos_enabled: scope_list.iter().any(|s| s == PHOTOS_SCOPE),
+                gmail_enabled: scope_list.iter().any(|s| s == GMAIL_SCOPE),
                 scopes: scope_list,
             })
         }
@@ -99,6 +157,22 @@ fn fetch_token_email(access_token: &str) -> Result<String, String> {
 }
 
 pub fn connect_drive_blocking(state: Arc<AppState>) -> Result<DriveAuthStatus, String> {
+    run_oauth_flow(state, READ_SCOPES, "Deduper connected!")
+}
+
+pub fn connect_cleanup_blocking(state: Arc<AppState>) -> Result<DriveAuthStatus, String> {
+    run_oauth_flow(
+        state,
+        CLEANUP_SCOPES,
+        "Deduper cleanup enabled! You can move verified duplicates to Google Drive Trash.",
+    )
+}
+
+fn run_oauth_flow(
+    state: Arc<AppState>,
+    scopes: &str,
+    success_title: &str,
+) -> Result<DriveAuthStatus, String> {
     let (client_id, client_secret) = load_client_credentials(&state)?;
     let port = oauth_port();
     let redirect_uri = format!("http://127.0.0.1:{port}/oauth/callback");
@@ -112,7 +186,7 @@ pub fn connect_drive_blocking(state: Arc<AppState>) -> Result<DriveAuthStatus, S
         q.append_pair("client_id", &client_id);
         q.append_pair("redirect_uri", &redirect_uri);
         q.append_pair("response_type", "code");
-        q.append_pair("scope", READONLY_SCOPE);
+        q.append_pair("scope", scopes);
         q.append_pair("code_challenge", pkce_challenge.as_str());
         q.append_pair("code_challenge_method", "S256");
         q.append_pair("access_type", "offline");
@@ -121,7 +195,7 @@ pub fn connect_drive_blocking(state: Arc<AppState>) -> Result<DriveAuthStatus, S
 
     open::that(auth_url.as_str()).map_err(|e| format!("failed to open browser: {e}"))?;
 
-    let code = wait_for_callback(port)?;
+    let code = wait_for_callback(port, success_title)?;
 
     let client = Client::new();
     let token_resp = client
@@ -155,6 +229,7 @@ pub fn connect_drive_blocking(state: Arc<AppState>) -> Result<DriveAuthStatus, S
         (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339()
     });
 
+    let scope_str = tokens.scope.as_deref().unwrap_or(scopes);
     let email = fetch_token_email(&tokens.access_token).ok();
 
     store_tokens(
@@ -162,27 +237,22 @@ pub fn connect_drive_blocking(state: Arc<AppState>) -> Result<DriveAuthStatus, S
         &tokens.access_token,
         tokens.refresh_token.as_deref(),
         expires_at.as_deref(),
-        tokens.scope.as_deref().unwrap_or(READONLY_SCOPE),
+        scope_str,
     )?;
 
-    ensure_drive_source(&state)?;
+    ensure_google_sources(&state)?;
 
     audit::log_action(
         &state,
         "drive_connected",
-        &serde_json::json!({ "email": email, "scope": READONLY_SCOPE }),
+        &serde_json::json!({ "email": email, "scope": scope_str }),
         true,
     )?;
 
-    Ok(DriveAuthStatus {
-        connected: true,
-        email,
-        scopes: vec![READONLY_SCOPE.into()],
-        write_enabled: false,
-    })
+    get_auth_status(&state)
 }
 
-fn wait_for_callback(port: u16) -> Result<String, String> {
+fn wait_for_callback(port: u16, success_title: &str) -> Result<String, String> {
     let server = Server::http(format!("127.0.0.1:{port}"))
         .map_err(|e| format!("failed to start OAuth callback server on port {port}: {e}"))?;
 
@@ -192,9 +262,11 @@ fn wait_for_callback(port: u16) -> Result<String, String> {
             for pair in query.split('&') {
                 if let Some(code) = pair.strip_prefix("code=") {
                     let code = decode_url_component(code);
-                    let html = "<html><body style='font-family:sans-serif;text-align:center;padding:3rem'>
-                        <h2>Deduper connected!</h2>
-                        <p>You can close this tab and return to Deduper.</p></body></html>";
+                    let html = format!(
+                        "<html><body style='font-family:sans-serif;text-align:center;padding:3rem'>
+                        <h2>{success_title}</h2>
+                        <p>You can close this tab and return to Deduper.</p></body></html>"
+                    );
                     let response = Response::from_string(html)
                         .with_header(Header::from_bytes("Content-Type", "text/html").unwrap());
                     let _ = request.respond(response);
@@ -242,25 +314,31 @@ fn store_tokens(
     .map_err(|e| e.to_string())
 }
 
-fn ensure_drive_source(state: &AppState) -> Result<(), String> {
+fn ensure_source(state: &AppState, source_type: &str, name: &str) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.with_conn(|conn| {
         let exists: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sources WHERE source_type = 'google_drive'",
-            [],
+            "SELECT COUNT(*) FROM sources WHERE source_type = ?1",
+            params![source_type],
             |row| row.get(0),
         )?;
-
         if exists == 0 {
             conn.execute(
                 "INSERT INTO sources (id, source_type, name, config_json, status, created_at)
-                 VALUES (?1, 'google_drive', 'Google Drive', '{}', 'idle', ?2)",
-                params![uuid::Uuid::new_v4().to_string(), now_iso()],
+                 VALUES (?1, ?2, ?3, '{}', 'idle', ?4)",
+                params![uuid::Uuid::new_v4().to_string(), source_type, name, now_iso()],
             )?;
         }
         Ok(())
     })
     .map_err(|e| e.to_string())
+}
+
+fn ensure_google_sources(state: &AppState) -> Result<(), String> {
+    ensure_source(state, "google_drive", "Google Drive")?;
+    ensure_source(state, "google_photos", "Google Photos")?;
+    ensure_source(state, "gmail_attachments", "Gmail large attachments")?;
+    Ok(())
 }
 
 pub fn disconnect_drive(state: &AppState) -> Result<(), String> {
@@ -271,31 +349,27 @@ pub fn disconnect_drive(state: &AppState) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    audit::log_action(
-        state,
-        "drive_disconnected",
-        &serde_json::json!({}),
-        true,
-    )
+    audit::log_action(state, "drive_disconnected", &serde_json::json!({}), true)
 }
 
 pub fn get_valid_access_token(state: &AppState) -> Result<String, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let (access_token, refresh_token, expires_at) = db
+    let (access_token, refresh_token, expires_at, scopes) = db
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE provider = ?1",
+                "SELECT access_token, refresh_token, expires_at, scopes FROM oauth_tokens WHERE provider = ?1",
             )?;
             stmt.query_row(params![PROVIDER], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .map_err(Into::into)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "Google account not connected — connect Google Drive first".to_string())?;
 
     let needs_refresh = expires_at
         .as_ref()
@@ -311,11 +385,15 @@ pub fn get_valid_access_token(state: &AppState) -> Result<String, String> {
         return Ok(access_token);
     }
 
-    let refresh = refresh_token.ok_or("no refresh token — reconnect Google Drive")?;
-    refresh_access_token(state, &refresh)
+    let refresh = refresh_token.ok_or("Session expired — please connect Google again")?;
+    refresh_access_token(state, &refresh, &scopes)
 }
 
-fn refresh_access_token(state: &AppState, refresh_token: &str) -> Result<String, String> {
+fn refresh_access_token(
+    state: &AppState,
+    refresh_token: &str,
+    existing_scopes: &str,
+) -> Result<String, String> {
     let (client_id, client_secret) = load_client_credentials(state)?;
     let client = Client::new();
     let resp = client
@@ -330,7 +408,7 @@ fn refresh_access_token(state: &AppState, refresh_token: &str) -> Result<String,
         .map_err(|e| e.to_string())?;
 
     if !resp.status().is_success() {
-        return Err("token refresh failed — reconnect Google Drive".into());
+        return Err("Session expired — please connect Google again".into());
     }
 
     #[derive(Deserialize)]
@@ -349,15 +427,223 @@ fn refresh_access_token(state: &AppState, refresh_token: &str) -> Result<String,
         &body.access_token,
         Some(refresh_token),
         expires_at.as_deref(),
-        READONLY_SCOPE,
+        existing_scopes,
     )?;
 
     Ok(body.access_token)
 }
 
-#[allow(dead_code)]
-pub fn request_write_scope_note() -> &'static str {
-    "Move to Drive Trash requires separate OAuth consent with drive.file scope. Never auto-deletes."
+pub fn get_storage_quota(state: &AppState) -> Result<StorageQuota, String> {
+    let token = get_valid_access_token(state)?;
+    let client = Client::new();
+    let resp = client
+        .get("https://www.googleapis.com/drive/v3/about?fields=storageQuota")
+        .bearer_auth(&token)
+        .send()
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err("Could not read your Google storage usage".into());
+    }
+
+    #[derive(Deserialize)]
+    struct AboutResponse {
+        #[serde(rename = "storageQuota")]
+        storage_quota: StorageQuotaRaw,
+    }
+
+    #[derive(Deserialize)]
+    struct StorageQuotaRaw {
+        limit: Option<String>,
+        usage: Option<String>,
+        #[serde(rename = "usageInDrive")]
+        usage_in_drive: Option<String>,
+        #[serde(rename = "usageInDriveTrash")]
+        usage_in_trash: Option<String>,
+    }
+
+    let about: AboutResponse = resp.json().map_err(|e| e.to_string())?;
+    let q = about.storage_quota;
+
+    let limit_bytes = q.limit.as_deref().unwrap_or("0").parse::<i64>().unwrap_or(0);
+    let usage_bytes = q.usage.as_deref().unwrap_or("0").parse::<i64>().unwrap_or(0);
+    let usage_in_drive_bytes = q
+        .usage_in_drive
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<i64>()
+        .unwrap_or(0);
+    let usage_in_trash_bytes = q
+        .usage_in_trash
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<i64>()
+        .unwrap_or(0);
+    let free_bytes = (limit_bytes - usage_bytes).max(0);
+    let percent_used = if limit_bytes > 0 {
+        (usage_bytes as f64 / limit_bytes as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let quota = StorageQuota {
+        limit_bytes,
+        usage_bytes,
+        usage_in_drive_bytes,
+        usage_in_trash_bytes,
+        free_bytes,
+        usage_display: format_bytes(usage_bytes),
+        limit_display: format_bytes(limit_bytes),
+        free_display: format_bytes(free_bytes),
+        percent_used,
+    };
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.with_conn(|conn| {
+        set_setting(conn, "quota_snapshot_json", &serde_json::to_string(&quota).unwrap_or_default())
+    })
+    .map_err(|e| e.to_string())?;
+
+    Ok(quota)
 }
 
-pub const WRITE_SCOPE_URL: &str = WRITE_SCOPE;
+fn format_bytes(bytes: i64) -> String {
+    if bytes <= 0 {
+        return "0 GB".into();
+    }
+    let gb = bytes as f64 / 1024f64.powi(3);
+    if gb >= 1.0 {
+        format!("{gb:.1} GB")
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1024f64.powi(2))
+    }
+}
+
+pub fn move_recovery_candidates_to_trash(
+    state: &AppState,
+    dry_run: bool,
+) -> Result<TrashResult, String> {
+    if !has_scope(state, DRIVE_FULL_SCOPE)? {
+        return Err(
+            "Cleanup permission not granted. Click \"Enable Google Drive cleanup\" and sign in again."
+                .into(),
+        );
+    }
+
+    let token = get_valid_access_token(state)?;
+    let quota_before = get_storage_quota(state).ok();
+
+    let candidates: Vec<(String, i64)> = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT drive_file_id, size_bytes FROM recovery_candidates WHERE verified_safe = 1",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .map_err(|e| e.to_string())?
+    };
+
+    if candidates.is_empty() {
+        return Err(
+            "Nothing to move — run a full check first. Only files already saved on your PC or phone can be moved to Trash."
+                .into(),
+        );
+    }
+
+    let client = Client::new();
+    let mut trashed = 0i64;
+    let mut skipped = 0i64;
+    let mut failed = 0i64;
+    let mut bytes_freed = 0i64;
+
+    for (file_id, size) in candidates {
+        if dry_run {
+            trashed += 1;
+            bytes_freed += size;
+            continue;
+        }
+
+        let url = format!("https://www.googleapis.com/drive/v3/files/{file_id}");
+        let resp = client
+            .patch(&url)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "trashed": true }))
+            .send()
+            .map_err(|e| e.to_string())?;
+
+        if resp.status().is_success() {
+            trashed += 1;
+            bytes_freed += size;
+        } else if resp.status().as_u16() == 404 {
+            skipped += 1;
+        } else {
+            failed += 1;
+        }
+    }
+
+    let quota_after = if dry_run {
+        quota_before
+    } else {
+        get_storage_quota(state).ok()
+    };
+
+    audit::log_action(
+        state,
+        "drive_trash_move",
+        &serde_json::json!({
+            "trashed": trashed,
+            "skipped": skipped,
+            "failed": failed,
+            "bytes_freed": bytes_freed,
+        }),
+        dry_run,
+    )?;
+
+    Ok(TrashResult {
+        trashed_count: trashed,
+        skipped_count: skipped,
+        failed_count: failed,
+        bytes_freed,
+        dry_run,
+        quota_after,
+    })
+}
+
+pub fn download_file(access_token: &str, file_id: &str, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let url = format!("https://www.googleapis.com/drive/v3/files/{file_id}?alt=media");
+    let client = Client::new();
+    let resp = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .map_err(|e| format!("download failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("Google Drive download error {status}: {body}"));
+    }
+
+    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// Backward compat for UI field name
+impl DriveAuthStatus {
+    #[allow(dead_code)]
+    pub fn write_enabled(&self) -> bool {
+        self.cleanup_enabled
+    }
+}
+
+pub const WRITE_SCOPE_URL: &str = DRIVE_FULL_SCOPE;

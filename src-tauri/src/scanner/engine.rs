@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use rusqlite::params;
 use uuid::Uuid;
 
@@ -10,10 +11,14 @@ use crate::state::AppState;
 
 use super::{
     drive::DriveScanner,
+    gmail::GmailScanner,
     local::{LocalScanner, PhoneImportScanner},
     mtp::MtpScanner,
+    photos::PhotosScanner,
     ScannedItem, SourceScanner, SourceType,
 };
+
+const HASH_BATCH: usize = 64;
 
 pub fn build_scanner(
     source_type: &SourceType,
@@ -36,8 +41,16 @@ pub fn build_scanner(
             Ok(Box::new(PhoneImportScanner::new(PathBuf::from(path))))
         }
         SourceType::GoogleDrive => {
-            let token = access_token.ok_or("Google Drive not connected")?;
+            let token = access_token.ok_or("Google account not connected")?;
             Ok(Box::new(DriveScanner::new(token)))
+        }
+        SourceType::GooglePhotos => {
+            let token = access_token.ok_or("Google account not connected")?;
+            Ok(Box::new(PhotosScanner::new(token)))
+        }
+        SourceType::GmailAttachments => {
+            let token = access_token.ok_or("Google account not connected")?;
+            Ok(Box::new(GmailScanner::new(token)))
         }
         SourceType::AndroidMtp => {
             let name = config
@@ -80,10 +93,11 @@ pub fn run_scan(
     let config: serde_json::Value =
         serde_json::from_str(&config).map_err(|e| e.to_string())?;
 
-    let access_token = if source_type == SourceType::GoogleDrive {
-        Some(crate::oauth::drive::get_valid_access_token(&state)?)
-    } else {
-        None
+    let access_token = match source_type {
+        SourceType::GoogleDrive | SourceType::GooglePhotos | SourceType::GmailAttachments => {
+            Some(crate::oauth::drive::get_valid_access_token(&state)?)
+        }
+        _ => None,
     };
 
     let scanner = build_scanner(&source_type, &config, access_token)?;
@@ -93,23 +107,57 @@ pub fn run_scan(
 
     let checkpoint = load_checkpoint(&state, &job_id)?;
     let start_index = checkpoint.unwrap_or(0) as usize;
+    let is_cloud = matches!(
+        source_type,
+        SourceType::GoogleDrive | SourceType::GooglePhotos | SourceType::GmailAttachments
+    );
 
-    for (idx, item) in items.iter().enumerate().skip(start_index) {
+    for batch_start in (start_index..items.len()).step_by(HASH_BATCH) {
         if state.is_scan_cancelled() {
-            save_checkpoint(&state, &job_id, idx as i64)?;
+            save_checkpoint(&state, &job_id, batch_start as i64)?;
             update_job_status(&state, &job_id, "cancelled", None)?;
             return Ok(());
         }
 
-        update_progress(&state, &job_id, &source_id, idx as i64 + 1, &item.filename)?;
+        let batch_end = (batch_start + HASH_BATCH).min(items.len());
+        let batch = &items[batch_start..batch_end];
 
-        let file_id = Uuid::new_v4().to_string();
-        let content_hash = resolve_content_hash(&*scanner, item, source_type == SourceType::GoogleDrive)?;
+        if !is_cloud {
+            let hashed: Vec<(usize, Option<(String, Option<String>)>)> = batch
+                .par_iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let global_idx = batch_start + i;
+                    let hash_pair = if let Some(cached) =
+                        load_cached_hash(&state, &source_id, item)?
+                    {
+                        Some(cached)
+                    } else {
+                        resolve_content_hash(&*scanner, item, false)?
+                    };
+                    Ok((global_idx, hash_pair))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
 
-        insert_file(&state, &file_id, &source_id, item, &content_hash)?;
+            for (idx, hash_pair) in hashed {
+                let item = &items[idx];
+                update_progress(&state, &job_id, &source_id, idx as i64 + 1, &item.filename)?;
+                let file_id = Uuid::new_v4().to_string();
+                insert_file(&state, &file_id, &source_id, item, &hash_pair)?;
+                increment_hashed(&state, &job_id)?;
+            }
+        } else {
+            for (i, item) in batch.iter().enumerate() {
+                let idx = batch_start + i;
+                update_progress(&state, &job_id, &source_id, idx as i64 + 1, &item.filename)?;
+                let file_id = Uuid::new_v4().to_string();
+                let hash_pair = resolve_content_hash(&*scanner, item, true)?;
+                insert_file(&state, &file_id, &source_id, item, &hash_pair)?;
+                increment_hashed(&state, &job_id)?;
+            }
+        }
 
-        increment_hashed(&state, &job_id)?;
-        save_checkpoint(&state, &job_id, idx as i64 + 1)?;
+        save_checkpoint(&state, &job_id, batch_end as i64)?;
     }
 
     recompute_duplicates(&state)?;
@@ -140,23 +188,63 @@ pub fn run_scan(
     Ok(())
 }
 
+/// Returns (content_hash, md5_checksum column value).
 fn resolve_content_hash(
     scanner: &dyn SourceScanner,
     item: &ScannedItem,
-    is_drive: bool,
-) -> Result<Option<String>, String> {
-    if is_drive {
-        // Drive provides md5Checksum for binary files; use as content identity when present
+    is_cloud: bool,
+) -> Result<Option<(String, Option<String>)>, String> {
+    if let Some(ref preset) = item.content_hash {
+        return Ok(Some((preset.clone(), item.md5_checksum.clone())));
+    }
+
+    if is_cloud {
         if let Some(md5) = &item.md5_checksum {
-            return Ok(Some(format!("md5:{}", hash::normalize_md5(md5))));
+            let normalized = hash::normalize_md5(md5);
+            return Ok(Some((
+                hash::content_identity_from_md5(&normalized),
+                Some(normalized),
+            )));
         }
         return Ok(None);
     }
 
     let path = scanner.read_file_for_hash(item)?;
-    hash::hash_file(&path)
-        .map(Some)
-        .map_err(|e| format!("hash failed for {}: {e}", path.display()))
+    let fp = hash::fingerprint_file(&path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    Ok(Some((fp.content_hash, Some(fp.md5_hex))))
+}
+
+fn load_cached_hash(
+    state: &AppState,
+    source_id: &str,
+    item: &ScannedItem,
+) -> Result<Option<(String, Option<String>)>, String> {
+    let modified = item.modified_at.map(|d| d.to_rfc3339());
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT content_hash, md5_checksum FROM files
+             WHERE source_id = ?1 AND relative_path = ?2 AND size_bytes = ?3
+             AND content_hash IS NOT NULL
+             AND (modified_at IS ?4 OR ?4 IS NULL)",
+        )?;
+        let result = stmt.query_row(
+            params![
+                source_id,
+                item.relative_path,
+                item.size_bytes as i64,
+                modified
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        );
+        match result {
+            Ok(pair) => Ok(Some(pair)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn update_job_totals(state: &AppState, job_id: &str, total: i64) -> Result<(), String> {
@@ -220,8 +308,13 @@ fn insert_file(
     file_id: &str,
     source_id: &str,
     item: &ScannedItem,
-    content_hash: &Option<String>,
+    hash_pair: &Option<(String, Option<String>)>,
 ) -> Result<(), String> {
+    let (content_hash, md5_checksum) = match hash_pair {
+        Some((h, m)) => (Some(h.clone()), m.clone()),
+        None => (None, None),
+    };
+
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.with_conn(|conn| {
         conn.execute(
@@ -242,7 +335,7 @@ fn insert_file(
                 item.mime_type,
                 item.modified_at.map(|d| d.to_rfc3339()),
                 content_hash,
-                item.md5_checksum,
+                md5_checksum,
                 item.drive_file_id,
                 now_iso(),
             ],
@@ -281,15 +374,20 @@ pub fn recompute_duplicates(state: &AppState) -> Result<(), String> {
 
         for (hash, count, total_size, primary_id) in groups {
             let group_id = Uuid::new_v4().to_string();
+            let confidence = if hash.starts_with("likely:") {
+                "likely_duplicate"
+            } else {
+                "verified_duplicate"
+            };
             conn.execute(
                 "INSERT INTO duplicate_groups (id, content_hash, file_count, total_size_bytes, primary_file_id, created_at)
                  VALUES (?1,?2,?3,?4,?5,?6)",
                 params![group_id, hash, count, total_size, primary_id, now_iso()],
             )?;
             conn.execute(
-                "UPDATE files SET confidence = 'verified_duplicate', duplicate_group_id = ?1
-                 WHERE content_hash = ?2",
-                params![group_id, hash],
+                "UPDATE files SET confidence = ?1, duplicate_group_id = ?2
+                 WHERE content_hash = ?3",
+                params![confidence, group_id, hash],
             )?;
         }
 
@@ -326,7 +424,8 @@ pub fn build_recovery_candidates(state: &AppState) -> Result<(), String> {
              JOIN sources sd ON d.source_id = sd.id AND sd.source_type = 'google_drive'
              JOIN sources sl ON l.source_id = sl.id AND sl.source_type IN ('local', 'phone_import', 'android_mtp')
              WHERE d.confidence = 'verified_duplicate'
-             AND d.drive_file_id IS NOT NULL",
+             AND d.drive_file_id IS NOT NULL
+             AND d.content_hash IS NOT NULL",
             params![now_iso()],
         )?;
 
@@ -400,4 +499,8 @@ fn load_checkpoint(state: &AppState, job_id: &str) -> Result<Option<i64>, String
 
 fn clear_checkpoint(state: &AppState, job_id: &str) -> Result<(), String> {
     save_checkpoint(state, job_id, 0)
+}
+
+pub fn update_job_failed(state: &AppState, job_id: &str, error: &str) -> Result<(), String> {
+    update_job_status(state, job_id, "failed", Some(error))
 }
