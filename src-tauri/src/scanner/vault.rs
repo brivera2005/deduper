@@ -35,6 +35,8 @@ pub fn source_label(source_type: &str, name: &str) -> String {
 pub fn vault_subfolder(source_type: &SourceType) -> &'static str {
     match source_type {
         SourceType::GoogleDrive => "from-google-drive",
+        SourceType::GooglePhotos => "from-google-photos",
+        SourceType::GmailAttachments => "from-gmail",
         SourceType::AndroidMtp => "from-phone",
         SourceType::PhoneImport => "from-phone-backup",
         SourceType::Local => "from-this-pc",

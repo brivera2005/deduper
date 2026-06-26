@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 use crate::audit;
 use crate::db::now_iso;
-use crate::scanner::mtp;
 use crate::state::AppState;
 
 use super::engine;
@@ -206,7 +205,7 @@ pub fn run_full_audit(
         }
 
         state.reset_scan_cancel();
-        match engine::run_scan(state.clone(), source_id.clone(), scan_job_id) {
+        match engine::run_scan(state.clone(), source_id.clone(), scan_job_id.clone()) {
             Ok(()) => {}
             Err(e) if source_type == "android_mtp" || source_type == "google_photos" || source_type == "gmail_attachments" => {
                 engine::update_job_failed(&state, &scan_job_id, &e)?;
