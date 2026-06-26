@@ -339,7 +339,9 @@ export default function App() {
   };
 
   const runFullAudit = async () => {
-    if (!stats?.vault_path && !setup?.vault_set) {
+    const vaultPath =
+      stats?.vault_path ?? (await invoke<string | null>("get_vault_path").catch(() => null));
+    if (!vaultPath) {
       showToast("Pick your PC photo folder first — click Setup.");
       setShowWizard(true);
       return;
@@ -546,8 +548,9 @@ export default function App() {
             setShowWizard(false);
             refresh();
           }}
-          onRunFirstCheck={() => {
+          onRunFirstCheck={async () => {
             setShowWizard(false);
+            await refresh();
             runFullAudit();
           }}
           onSkip={() => {

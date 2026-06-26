@@ -113,6 +113,12 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
     refresh().catch(console.error);
   }, [refresh]);
 
+  useEffect(() => {
+    if (step === 3 && oauthStatus && !oauthStatus.configured) {
+      setShowAdvancedOAuth(true);
+    }
+  }, [step, oauthStatus]);
+
   // Phone detection runs PowerShell/COM on Windows — only when the user clicks "Detect phone"
   // (auto-detect on step enter used to freeze the webview on the main thread).
 
@@ -149,6 +155,9 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
         clientSecret: googleSecret.trim(),
       });
       await refresh();
+      const da = await invoke<DriveAuthStatus>("connect_google_drive");
+      setDriveAuth(da);
+      await refresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -157,6 +166,13 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
   };
 
   const connectDrive = async () => {
+    if (!oauthStatus?.configured) {
+      setShowAdvancedOAuth(true);
+      setError(
+        "Google sign-in needs your OAuth app first. Paste Client ID and Secret below, click Save credentials, then Connect again.",
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -339,14 +355,14 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
                 <button
                   className="btn btn-primary btn-lg"
                   onClick={connectDrive}
-                  disabled={busy || !oauthStatus?.configured}
+                  disabled={busy}
                 >
                   Connect Google Drive
                 </button>
                 {!oauthStatus?.configured && (
                   <div className="wizard-highlight muted">
-                    Sign-in is not bundled in this build. Expand Advanced below if you are building
-                    from source with your own Google Cloud app.
+                    This build needs your Google Cloud OAuth app once. Expand Advanced below, paste
+                    Client ID and Secret, click Save credentials, then Connect.
                   </div>
                 )}
                 <div className="why-block">
@@ -401,7 +417,7 @@ export function SetupWizard({ onComplete, onRunFirstCheck, onSkip, forceOpen }: 
                           onClick={saveGoogleCreds}
                           disabled={busy}
                         >
-                          Save credentials
+                          Save and connect Google Drive
                         </button>
                       </div>
                     </div>
