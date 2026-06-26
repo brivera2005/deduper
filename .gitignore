@@ -26,6 +26,10 @@ config.json
 
 # Rust / Tauri artifacts
 *.pdb
+*.key
+*.key.pub
+
+# Tauri updater signing (private key lives in %USERPROFILE%\.tauri\)
 
 # Editor directories and files
 .vscode/*
