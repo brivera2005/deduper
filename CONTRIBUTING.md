@@ -6,7 +6,7 @@ Thanks for your interest in making Deduper better!
 
 1. Fork the repo and clone it locally.
 2. Install [Node.js 18+](https://nodejs.org), [Rust stable](https://rustup.rs), and the Visual Studio 2022 C++ build tools (Windows).
-3. Copy `.env.example` to `.env` (or `deduper-oauth.json.example` to `deduper-oauth.json`) for local OAuth — never commit either file. Release builds embed credentials from `.env` at compile time.
+3. Copy `.env.example` to `.env` (or `deduper-oauth.json.example` to `deduper-oauth.json`) for local OAuth - never commit either file. Release builds embed credentials from `.env` at compile time.
 4. Run `npm install`, then `npm run tauri dev`.
 
 ## Pull requests
@@ -22,4 +22,4 @@ Include OS version, Deduper version, and steps to reproduce. Redact OAuth client
 
 ## Code of conduct
 
-Be respectful and constructive. Deduper is safety-first — contributions should preserve that default (no surprise deletes).
+Be respectful and constructive. Deduper is safety-first - contributions should preserve that default (no surprise deletes).

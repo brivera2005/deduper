@@ -2,9 +2,9 @@
 
 Deduper v1.0 ships with:
 
-1. **Windows NSIS installer** (`.exe`) — built on GitHub Actions when you push a `v*` tag
-2. **Tauri auto-updater** — signed update packages + `latest.json` on GitHub Releases
-3. **Optional Windows Authenticode** — SmartScreen trust for the installer (requires a code-signing certificate)
+1. **Windows NSIS installer** (`.exe`) - built on GitHub Actions when you push a `v*` tag
+2. **Tauri auto-updater** - signed update packages + `latest.json` on GitHub Releases
+3. **Optional Windows Authenticode** - SmartScreen trust for the installer (requires a code-signing certificate)
 
 Auto-updates use **GitHub Releases**, not Windows Update or the Microsoft Store. Installed apps check for updates on launch and via the tray/header menu.
 
@@ -26,7 +26,7 @@ Add these in **Settings → Secrets and variables → Actions**:
 | `TAURI_SIGNING_PRIVATE_KEY` | Full contents of `deduper.key` (the private key file) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password used when generating the key |
 
-If you lose the private key or password, you cannot publish compatible updates — generate a new keypair and update the pubkey in `tauri.conf.json`.
+If you lose the private key or password, you cannot publish compatible updates - generate a new keypair and update the pubkey in `tauri.conf.json`.
 
 ---
 
@@ -69,8 +69,8 @@ The workflow `.github/workflows/release.yml` will:
 
 ## How auto-update works for users
 
-1. App calls `check()` against  
-   `https://github.com/brivera2005/deduper/releases/latest/download/latest.json`
+1. App calls `check()` against 
+ `https://github.com/brivera2005/deduper/releases/latest/download/latest.json`
 2. If a newer signed version exists, the UI offers **Install update**
 3. Download + install runs in the background; app restarts via `tauri-plugin-process`
 

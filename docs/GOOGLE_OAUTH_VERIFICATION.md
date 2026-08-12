@@ -7,24 +7,24 @@ Use this checklist to move Deduper from **Testing** to **Published / Verified** 
 1. Open [Google Cloud Console](https://console.cloud.google.com/)
 2. Create or select project **Deduper**
 3. Enable APIs:
-   - Google Drive API
-   - Google Photos Library API
-   - Gmail API
+ - Google Drive API
+ - Google Photos Library API
+ - Gmail API
 
 ## 2. OAuth consent screen
 
-**User type:** External  
-**App name:** Deduper  
-**User support email:** your email  
-**Developer contact:** your email  
+**User type:** External 
+**App name:** Deduper 
+**User support email:** your email 
+**Developer contact:** your email 
 
-**App home page:**  
+**App home page:** 
 `https://github.com/brivera2005/deduper`
 
-**Privacy policy URL:**  
+**Privacy policy URL:** 
 `https://github.com/brivera2005/deduper/blob/main/docs/PRIVACY.md`
 
-**Terms of service (optional but recommended):**  
+**Terms of service (optional but recommended):** 
 Same repo or a simple GitHub Pages site.
 
 ### Scopes (justify each in the verification form)
@@ -44,7 +44,7 @@ Same repo or a simple GitHub Pages site.
 http://127.0.0.1:8888/oauth/callback
 ```
 
-Deduper uses a local loopback redirect (desktop app pattern). Add this exact URI under **OAuth 2.0 Client ID → Web application** (or Desktop if you use desktop client type — match what the app embeds at build time).
+Deduper uses a local loopback redirect (desktop app pattern). Add this exact URI under **OAuth 2.0 Client ID → Web application** (or Desktop if you use desktop client type - match what the app embeds at build time).
 
 ## 3. OAuth client credentials
 
@@ -61,10 +61,10 @@ For production releases, embed credentials in CI secrets or `src-tauri/resources
 2. Add test users while in Testing mode
 3. When ready: **Publish app** → **Prepare for verification**
 4. Provide:
-   - YouTube demo (2–3 min): connect Google → run check → show proof → optional Trash preview (do not trash real data on demo account)
-   - Written explanation per sensitive scope (use table above)
-   - Link to privacy policy
-   - Explanation that data stays local; Google APIs used only on user action
+ - YouTube demo (2 - 3 min): connect Google → run check → show proof → optional Trash preview (do not trash real data on demo account)
+ - Written explanation per sensitive scope (use table above)
+ - Link to privacy policy
+ - Explanation that data stays local; Google APIs used only on user action
 
 Review typically takes several days to weeks.
 
@@ -87,11 +87,11 @@ After verification, Google shows your app name and logo on the consent screen in
 
 ## Questions Google often asks
 
-**Does your app need all requested scopes?**  
-Yes — readonly for audit; full Drive only for user-confirmed Trash moves.
+**Does your app need all requested scopes?** 
+Yes - readonly for audit; full Drive only for user-confirmed Trash moves.
 
-**Where is user data stored?**  
+**Where is user data stored?** 
 On the user’s Windows PC only.
 
-**Do you share data with third parties?**  
-No — except calls to Google APIs the user initiates.
+**Do you share data with third parties?** 
+No - except calls to Google APIs the user initiates.

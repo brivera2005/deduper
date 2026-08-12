@@ -1,8 +1,8 @@
 # Deduper Privacy Policy
 
-**Last updated:** June 26, 2025  
-**App:** Deduper (Windows desktop)  
-**Publisher:** Benjamin Rivera  
+**Last updated:** June 26, 2025 
+**App:** Deduper (Windows desktop) 
+**Publisher:** Benjamin Rivera 
 **Contact:** [GitHub Issues](https://github.com/brivera2005/deduper/issues)
 
 ## Summary
@@ -38,14 +38,14 @@ Deduper does not send your files to any server other than Google’s APIs when y
 
 ## Auto-updates
 
-When you install from GitHub Releases, Deduper may check  
-`https://github.com/brivera2005/deduper/releases/latest/download/latest.json`  
-for newer versions. Update packages are cryptographically signed (Tauri updater). Installing an update downloads the installer from GitHub Releases — not Windows Update or the Microsoft Store.
+When you install from GitHub Releases, Deduper may check 
+`https://github.com/brivera2005/deduper/releases/latest/download/latest.json` 
+for newer versions. Update packages are cryptographically signed (Tauri updater). Installing an update downloads the installer from GitHub Releases - not Windows Update or the Microsoft Store.
 
 ## Third parties
 
-- **Google** — OAuth and APIs when you connect (subject to [Google Privacy Policy](https://policies.google.com/privacy))
-- **GitHub** — hosting releases and update manifests
+- **Google** - OAuth and APIs when you connect (subject to [Google Privacy Policy](https://policies.google.com/privacy))
+- **GitHub** - hosting releases and update manifests
 
 ## Your choices
 
